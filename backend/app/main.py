@@ -23,6 +23,7 @@ from app.core.device import device_info
 from app.api.routes import router as api_router
 from app.ws.handlers import router as ws_router
 from app.ingest.registry import SourceRegistry
+from app.perception.workers import PerceptionManager
 
 # ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -72,11 +73,18 @@ async def lifespan(app: FastAPI):
             )
             await registry.start_source(f"sim-{i+1}")
 
+    # Start Perception Manager
+    perception = PerceptionManager.instance()
+    await perception.start()
+
     logger.info("Startup complete — ready to accept connections")
 
     yield  # ── App runs here ──
 
     logger.info("Shutting down Spectra…")
+    
+    await perception.stop()
+    
     await registry.stop_all()
     logger.info("All sources stopped. Goodbye.")
 

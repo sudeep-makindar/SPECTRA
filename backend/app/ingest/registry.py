@@ -235,20 +235,32 @@ class SourceRegistry:
             logger.warning("Cannot start source %s — not found or no adapter", source_id)
             return
 
-        async def _run():
+        async def _run_adapter():
             try:
                 await entry.adapter.start(entry.enqueue)
             except asyncio.CancelledError:
                 pass
             except Exception as exc:
-                logger.error("Source %s crashed: %s", source_id, exc, exc_info=True)
+                logger.error("Source %s adapter crashed: %s", source_id, exc, exc_info=True)
                 entry.status = "error"
+                
+        async def _run_consumer():
+            from app.perception.workers import PerceptionManager
+            pm = PerceptionManager.instance()
+            try:
+                while True:
+                    packet = await entry.queue.get()
+                    await pm.process_packet(packet)
+                    entry.queue.task_done()
+            except asyncio.CancelledError:
+                pass
 
-        entry._task = asyncio.create_task(_run())
-        logger.info("Started source adapter: %s (%s)", entry.name, source_id)
+        # We keep track of both the adapter task and the consumer task in a tuple
+        entry._task = (asyncio.create_task(_run_adapter()), asyncio.create_task(_run_consumer()))
+        logger.info("Started source adapter & consumer: %s (%s)", entry.name, source_id)
 
     async def stop_source(self, source_id: str) -> None:
-        """Stop a source adapter."""
+        """Stop a source adapter and its consumer."""
         entry = self._sources.get(source_id)
         if not entry:
             return
@@ -256,10 +268,14 @@ class SourceRegistry:
         if entry.adapter:
             await entry.adapter.stop()
 
-        if entry._task and not entry._task.done():
-            entry._task.cancel()
+        if entry._task:
+            adapter_task, consumer_task = entry._task
+            if not adapter_task.done():
+                adapter_task.cancel()
+            if not consumer_task.done():
+                consumer_task.cancel()
             try:
-                await entry._task
+                await asyncio.gather(adapter_task, consumer_task, return_exceptions=True)
             except asyncio.CancelledError:
                 pass
 

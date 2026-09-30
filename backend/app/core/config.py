@@ -51,6 +51,16 @@ class AudioConfig(BaseModel):
     hop_s: float = 1.0
     model_name: str = "MIT/ast-finetuned-audioset-10-10-0.4593"
     model_mode: str = "pretrained"  # "pretrained" | "finetuned:<path>"
+    threat_groups: dict[str, list[str]] = Field(default_factory=lambda: {
+        "high_risk": [
+            "Screaming",
+            "Yell",
+            "Shout",
+            "Gunshot, gunfire",
+            "Explosion",
+            "Glass"
+        ]
+    })
 
 
 class FusionConfig(BaseModel):
