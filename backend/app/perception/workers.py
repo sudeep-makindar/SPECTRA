@@ -194,10 +194,11 @@ class PerceptionManager:
             metadata={
                 "threat_label": a_result["threat_label"],
                 "top_class": a_result["top_class"],
-                "top_prob": a_result["top_prob"]
+                "top_prob": a_result["top_prob"],
+                "detected_text": a_result.get("detected_text", "")
             }
         )
-        logger.debug("Audio: source=%s threat=%s prob=%.2f", packet.source_id, a_sample.metadata["top_class"], a_sample.metadata["top_prob"])
+        logger.debug("Audio: source=%s threat=%s prob=%.2f text='%s'", packet.source_id, a_sample.metadata["top_class"], a_sample.metadata["top_prob"], a_sample.metadata["detected_text"])
         
         if self.on_sample:
             await self.on_sample(a_sample)

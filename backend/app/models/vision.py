@@ -1,6 +1,6 @@
 """
-Vision Model — YOLO11 with ByteTrack for advanced crowd analytics.
-Tracks crowd density, average velocity, and flow chaos.
+Vision Model — YOLO26 with ByteTrack for advanced crowd analytics.
+Tracks crowd density, average velocity, flow chaos, and fallen persons.
 """
 
 from __future__ import annotations
@@ -19,9 +19,9 @@ logger = logging.getLogger("spectra.models.vision")
 
 
 class YoloModel(BaseModel):
-    """YOLO11-based person detector with object tracking."""
+    """YOLO26-based person detector with object tracking."""
 
-    def __init__(self, model_name: str = "yolo11s.pt"):
+    def __init__(self, model_name: str = "yolo26s.pt"):
         self.model_name = model_name
         self._model = None
         self._device = "cpu"
@@ -36,7 +36,7 @@ class YoloModel(BaseModel):
         if self._loaded:
             return
             
-        logger.info("Loading YOLO11 model (%s) on %s", self.model_name, device)
+        logger.info("Loading YOLO26 model (%s) on %s", self.model_name, device)
         self._device = device
         
         import sys
@@ -47,7 +47,7 @@ class YoloModel(BaseModel):
             self._model.to(device)
             
         self._loaded = True
-        logger.info("YOLO11 model loaded with ByteTrack capabilities")
+        logger.info("YOLO26 model loaded with ByteTrack capabilities")
 
     def predict(self, inputs: dict[str, Any]) -> dict:
         """
@@ -82,9 +82,10 @@ class YoloModel(BaseModel):
         max_people = self._config.fusion.weights.get("vision_max_people", 30)
         density = min(count / max_people, 1.0)
         
-        # Calculate advanced metrics: Velocity & Chaos
+        # Calculate advanced metrics: Velocity & Chaos & Fallen Persons
         avg_velocity = 0.0
         chaos_index = 0.0
+        fallen_count = 0
         
         if source_id not in self._prev_positions:
             self._prev_positions[source_id] = {}
@@ -97,8 +98,12 @@ class YoloModel(BaseModel):
             xywh = boxes.xywh.cpu().tolist()
             
             for t_id, box in zip(track_ids, xywh):
-                cx, cy = box[0], box[1]
+                cx, cy, w, h = box[0], box[1], box[2], box[3]
                 current_positions[t_id] = (cx, cy)
+                
+                # Heuristic: If width is significantly greater than height, person might be fallen
+                if w > (h * 1.5):
+                    fallen_count += 1
                 
                 # If we saw this person in the previous frame
                 if t_id in self._prev_positions[source_id]:
@@ -133,13 +138,14 @@ class YoloModel(BaseModel):
             "person_count": count,
             "density_score": density,
             "avg_velocity": round(avg_velocity, 2),
-            "chaos_index": round(chaos_index, 3)
+            "chaos_index": round(chaos_index, 3),
+            "fallen_count": fallen_count
         }
 
     def info(self) -> ModelInfo:
         return ModelInfo(
-            name="yolo11",
-            version="11s-bytetrack",
+            name="yolo26",
+            version="26s-bytetrack",
             source="pretrained",
             device=self._device,
             loaded=self._loaded

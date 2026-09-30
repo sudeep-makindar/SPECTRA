@@ -10,6 +10,7 @@ from typing import Any
 import torch
 import numpy as np
 from transformers import ASTForAudioClassification, ASTFeatureExtractor
+import whisper
 
 from app.models.registry import BaseModel, ModelInfo
 from app.core.config import load_config
@@ -26,6 +27,7 @@ class AstAudioModel(BaseModel):
         self._extractor = None
         self._device = "cpu"
         self._loaded = False
+        self._whisper_model = None
         
         # Load threat groups from config
         # e.g., ["Scream", "Gunshot, gunfire", "Explosion"]
@@ -47,6 +49,8 @@ class AstAudioModel(BaseModel):
             self._model = ASTForAudioClassification.from_pretrained(self.model_name)
             self._model.to(device)
             self._model.eval()
+            
+            self._whisper_model = whisper.load_model("tiny", device=device)
             
             self._id2label = self._model.config.id2label
             self._loaded = True
@@ -101,11 +105,30 @@ class AstAudioModel(BaseModel):
                     max_threat_prob = prob
                     top_threat_label = label
                     
+        # 2. Run Whisper Keyword Spotting
+        keyword_detected = False
+        detected_text = ""
+        try:
+            # Whisper expects 16kHz audio. 
+            result = self._whisper_model.transcribe(audio, fp16=False, language="en")
+            text = result["text"].lower()
+            detected_text = text
+            distress_keywords = ["help", "gun", "fire", "stop", "police"]
+            for kw in distress_keywords:
+                if kw in text:
+                    keyword_detected = True
+                    max_threat_prob = 1.0  # Max risk if distress keyword heard
+                    top_threat_label = f"KEYWORD: {kw.upper()}"
+                    break
+        except Exception as e:
+            logger.warning("Whisper transcription failed: %s", e)
+                    
         return {
             "audio_score": max_threat_prob,  # 0.0 to 1.0 based on threat probability
             "threat_label": top_threat_label if max_threat_prob > 0.05 else None,
             "top_class": top_class,
-            "top_prob": round(top_prob, 3)
+            "top_prob": round(top_prob, 3),
+            "detected_text": detected_text.strip()
         }
 
     def info(self) -> ModelInfo:
