@@ -24,6 +24,7 @@ from app.api.routes import router as api_router
 from app.ws.handlers import router as ws_router
 from app.ingest.registry import SourceRegistry
 from app.perception.workers import PerceptionManager
+from app.fusion.engine import FusionEngine
 
 # ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -73,8 +74,13 @@ async def lifespan(app: FastAPI):
             )
             await registry.start_source(f"sim-{i+1}")
 
+    # Start Fusion Engine
+    fusion = FusionEngine.instance()
+    await fusion.start()
+
     # Start Perception Manager
     perception = PerceptionManager.instance()
+    perception.on_sample = fusion.on_sample_received
     await perception.start()
 
     logger.info("Startup complete — ready to accept connections")
@@ -84,6 +90,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down Spectra…")
     
     await perception.stop()
+    await fusion.stop()
     
     await registry.stop_all()
     logger.info("All sources stopped. Goodbye.")

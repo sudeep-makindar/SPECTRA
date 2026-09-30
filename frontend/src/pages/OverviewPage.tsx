@@ -12,8 +12,18 @@ export function OverviewPage() {
   const [isAddSourceOpen, setIsAddSourceOpen] = useState(false);
   const state = useSpectraSocket();
 
-  const activeSources = state.sources.filter(s => s.status === 'online').length;
-  const totalSources = state.sources.length;
+  const activeSources = state.active_sources;
+  const totalSources = state.total_sources;
+  
+  // Calculate stroke dasharray for the circular progress (circumference ~ 326 for r=52)
+  const riskPercent = state.highest_risk;
+  
+  const getRiskColor = (risk: number) => {
+    if (risk >= 0.8) return 'var(--color-critical, #ef4444)';
+    if (risk >= 0.55) return 'var(--color-high, #f97316)';
+    if (risk >= 0.3) return 'var(--color-elevated, #eab308)';
+    return 'var(--color-sage)';
+  };
 
   return (
     <div className="bento-grid" style={{ padding: '8px' }}>
@@ -53,18 +63,22 @@ export function OverviewPage() {
               inset: '0',
               borderRadius: '50%',
               border: '8px solid transparent',
-              borderTopColor: 'var(--color-sage)',
-              borderRightColor: 'var(--color-lavender)',
+              borderTopColor: getRiskColor(riskPercent),
+              borderRightColor: riskPercent > 0.25 ? getRiskColor(riskPercent) : 'transparent',
+              borderBottomColor: riskPercent > 0.5 ? getRiskColor(riskPercent) : 'transparent',
+              borderLeftColor: riskPercent > 0.75 ? getRiskColor(riskPercent) : 'transparent',
               transform: 'rotate(-45deg)',
+              transition: 'all 0.3s ease-out'
             }} />
             <span className="pill-btn pill-btn-sm" style={{
               background: 'var(--color-surface-overlay)',
-              color: 'var(--color-text-secondary)',
+              color: 'var(--color-text-primary)',
               border: 'none',
-              fontSize: '0.75rem',
+              fontSize: '1rem',
+              fontWeight: 600,
               zIndex: 1,
             }}>
-              —
+              {(riskPercent * 100).toFixed(0)}%
             </span>
           </div>
         </div>
@@ -137,7 +151,13 @@ export function OverviewPage() {
               color: 'var(--color-text-primary)', fontFamily: 'var(--font-sans)',
               fontSize: '0.875rem', outline: 'none', cursor: 'pointer',
             }}>
-              <option>No zones configured</option>
+              {Object.values(state.zones).length > 0 ? (
+                Object.values(state.zones).map(z => (
+                  <option key={z.zone_id}>{z.name} ({(z.risk_score * 100).toFixed(0)}%)</option>
+                ))
+              ) : (
+                <option>No zones configured</option>
+              )}
             </select>
           </div>
           <div className="input-group">

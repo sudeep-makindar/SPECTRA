@@ -19,6 +19,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from app.ingest.registry import SourceRegistry
 from app.ingest.base import SourcePacket, SourceKind
 from app.core.metrics import MetricsCollector
+from app.fusion.engine import FusionEngine
 
 logger = logging.getLogger("spectra.ws")
 router = APIRouter()
@@ -45,13 +46,24 @@ async def ws_live(ws: WebSocket):
     try:
         while True:
             registry = SourceRegistry.instance()
+            fusion = FusionEngine.instance()
+            
+            sources = registry.to_list()
+            total_sources = len(sources)
+            active_sources = sum(1 for s in sources if s.get("status") == "online")
+
+            # Get system state
+            system_state = fusion.get_system_state(active_sources, total_sources)
+            payload = system_state.to_dict()
+            
+            # Attach system metrics and sources
+            payload["sources"] = sources
+            payload["metrics"] = MetricsCollector.instance().snapshot()
 
             state = {
                 "type": "state",
                 "ts": time.time(),
-                "sources": registry.to_list(),
-                "metrics": MetricsCollector.instance().snapshot(),
-                # zones and alerts will be added in Phases 3-4
+                **payload
             }
 
             await ws.send_json(state)

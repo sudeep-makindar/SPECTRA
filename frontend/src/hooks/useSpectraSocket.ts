@@ -22,8 +22,24 @@ export interface SourceState {
   last_seen_age_s: number | null;
 }
 
+export interface ZoneState {
+  zone_id: string;
+  name: string;
+  risk_score: number;
+  alert_level: 'normal' | 'elevated' | 'high' | 'critical';
+  vision: { score: number; context: string; age_s: number };
+  motion: { score: number; context: string; age_s: number };
+  audio: { score: number; context: string; age_s: number };
+  last_updated: number;
+}
+
 export interface LiveState {
   sources: SourceState[];
+  active_sources: number;
+  total_sources: number;
+  active_zones: number;
+  highest_risk: number;
+  zones: Record<string, ZoneState>;
   metrics: {
     uptime_s: number;
     latencies: Record<string, { p50: number | null; p95: number | null; count: number }>;
@@ -34,6 +50,11 @@ export interface LiveState {
 
 const INITIAL_STATE: LiveState = {
   sources: [],
+  active_sources: 0,
+  total_sources: 0,
+  active_zones: 0,
+  highest_risk: 0,
+  zones: {},
   metrics: { uptime_s: 0, latencies: {}, sources: {} },
   connected: false,
 };
@@ -60,6 +81,11 @@ export function useSpectraSocket(): LiveState {
         if (data.type === 'state') {
           setState({
             sources: data.sources || [],
+            active_sources: data.active_sources || 0,
+            total_sources: data.total_sources || 0,
+            active_zones: data.active_zones || 0,
+            highest_risk: data.highest_risk || 0,
+            zones: data.zones || {},
             metrics: data.metrics || INITIAL_STATE.metrics,
             connected: true,
           });
