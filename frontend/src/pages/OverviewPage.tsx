@@ -4,14 +4,30 @@
  * Phase 1+: live data from WebSocket.
  */
 
+import { useState } from 'react';
+import { useSpectraSocket } from '../hooks/useSpectraSocket';
+import { AddSourceDialog } from '../components/AddSourceDialog';
+
 export function OverviewPage() {
+  const [isAddSourceOpen, setIsAddSourceOpen] = useState(false);
+  const state = useSpectraSocket();
+
+  const activeSources = state.sources.filter(s => s.status === 'online').length;
+  const totalSources = state.sources.length;
+
   return (
     <div className="bento-grid" style={{ padding: '8px' }}>
+      {isAddSourceOpen && (
+        <AddSourceDialog 
+          onClose={() => setIsAddSourceOpen(false)} 
+          onSourceAdded={() => {}} 
+        />
+      )}
       {/* Headline stat card (cream) — Total Headcount */}
       <div className="card card-cream" style={{ gridColumn: 'span 1' }}>
-        <div className="card-label">Total headcount · All zones</div>
-        <div className="card-value tabular-nums">—</div>
-        <div className="card-tag">Waiting for sources</div>
+        <div className="card-label">Active Sources</div>
+        <div className="card-value tabular-nums">{activeSources} / {totalSources}</div>
+        <div className="card-tag">Cameras & nodes</div>
         <div style={{ display: 'flex', gap: '8px', marginTop: '16px' }}>
           <button className="pill-btn pill-btn-dark pill-btn-sm">Acknowledge</button>
           <button className="pill-btn pill-btn-outlined pill-btn-sm">Escalate</button>
@@ -79,7 +95,11 @@ export function OverviewPage() {
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 13L13 1M13 1H5M13 1v8" /></svg>
           </div>
         </div>
-        <div className="card card-cream" style={{ flex: 1, display: 'flex', alignItems: 'flex-end', cursor: 'pointer' }}>
+        <div 
+          className="card card-cream" 
+          style={{ flex: 1, display: 'flex', alignItems: 'flex-end', cursor: 'pointer' }}
+          onClick={() => setIsAddSourceOpen(true)}
+        >
           <div className="card-title-display">ADD SOURCE</div>
           <div className="card-corner-icon">
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5"><line x1="7" y1="1" x2="7" y2="13" /><line x1="1" y1="7" x2="13" y2="7" /></svg>

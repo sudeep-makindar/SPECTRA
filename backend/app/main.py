@@ -21,6 +21,8 @@ from app.core.logging import setup_logging
 from app.core.metrics import MetricsCollector
 from app.core.device import device_info
 from app.api.routes import router as api_router
+from app.ws.handlers import router as ws_router
+from app.ingest.registry import SourceRegistry
 
 # ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -41,16 +43,42 @@ async def lifespan(app: FastAPI):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "incidents").mkdir(exist_ok=True)
 
-    # Initialize the DB (Phase 1+)
+    # Initialize the DB
     from app.db.session import init_db
     init_db()
+
+    # Start source staleness monitor
+    registry = SourceRegistry.instance()
+    await registry.start_staleness_monitor()
+
+    # If sim_mode, auto-create simulated sources for demo
+    if config.sim_mode:
+        logger.info("SIM MODE: creating simulated sources for demo")
+        from app.ingest.adapters import SimulatedSource
+
+        for i, name in enumerate(["Gate Cam 1", "Gate Cam 2", "Stage Cam"]):
+            adapter = SimulatedSource(
+                source_id=f"sim-{i+1}",
+                name=name,
+                target_fps=5,
+            )
+            from app.ingest.base import SourceKind
+            entry = registry.register(
+                name=name,
+                kind=SourceKind.VIDEO,
+                adapter_type="simulated",
+                source_id=f"sim-{i+1}",
+                adapter=adapter,
+            )
+            await registry.start_source(f"sim-{i+1}")
 
     logger.info("Startup complete — ready to accept connections")
 
     yield  # ── App runs here ──
 
     logger.info("Shutting down Spectra…")
-    # Worker cleanup will go here in later phases
+    await registry.stop_all()
+    logger.info("All sources stopped. Goodbye.")
 
 
 # ── App factory ────────────────────────────────────────────────────────
@@ -76,6 +104,9 @@ def create_app() -> FastAPI:
 
     # API routes
     app.include_router(api_router, prefix="/api")
+
+    # WebSocket routes
+    app.include_router(ws_router)
 
     # Serve incident clips with range support
     if DATA_DIR.exists():
