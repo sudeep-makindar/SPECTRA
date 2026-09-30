@@ -1,0 +1,35 @@
+# ──────────────────────────────────────────────────────────────────────
+# Spectra — Fusion Engine Configuration
+# ──────────────────────────────────────────────────────────────────────
+# All weights and thresholds live here, not in code.
+# Per-zone overrides are stored in the Zone.thresholds_json DB field.
+
+# Signal weights (must sum to ~1.0)
+weight_density: 0.35
+weight_motion: 0.35
+weight_audio: 0.30
+
+# Cross-modal confirmation
+cross_modal_multiplier: 1.4   # Boost when ≥2 modalities agree
+cross_modal_window_s: 3.0     # Time window for cross-modal matching
+single_modal_dampen: 0.7      # Dampen when only 1 modality fires
+
+# Temporal smoothing
+ema_alpha: 0.3                # Exponential moving average weight (higher = more reactive)
+
+# Source staleness
+staleness_timeout_s: 10.0     # Ignore source after this many seconds of silence
+
+# State machine thresholds (hysteresis: different up/down thresholds prevent flapping)
+threshold_elevated_up: 0.30
+threshold_elevated_down: 0.20
+threshold_high_up: 0.55
+threshold_high_down: 0.40
+threshold_critical_up: 0.80
+threshold_critical_down: 0.65
+
+# Cooldown — minimum time in NORMAL after leaving an elevated state
+cooldown_s: 15.0
+
+# Hard-trigger overrides — these can reach HIGH alone regardless of fusion
+gunshot_hard_trigger: 0.80

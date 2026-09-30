@@ -1,0 +1,42 @@
+# Dependencies & build
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.vite/
+
+# Data (large, local-only)
+data/
+*.db
+*.sqlite
+
+# Environment
+.env
+.env.local
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# ML models (downloaded at runtime)
+*.pt
+*.pth
+*.bin
+*.safetensors
+!training/configs/**
+
+# Media artifacts (incident clips, screenshots)
+*.mp4
+*.wav
+*.webm
+!docs/screenshots/**

@@ -1,0 +1,44 @@
+# ──────────────────────────────────────────────────────────────────────
+# Spectra — Application Configuration
+# ──────────────────────────────────────────────────────────────────────
+# Override any value with SPECTRA_<SECTION>_<KEY> env vars.
+# Example: SPECTRA_SERVER_PORT=9000
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+  reload: false
+  log_level: "info"
+  cors_origins:
+    - "*"
+
+video:
+  analysis_fps: 5
+  preview_width: 640
+  preview_quality: 70
+  flow_width: 320
+  flow_height: 180
+  baseline_window_s: 60.0
+
+audio:
+  sample_rate: 16000
+  window_s: 2.0
+  hop_s: 1.0
+  model_name: "MIT/ast-finetuned-audioset-10-10-0.4593"
+  model_mode: "pretrained"
+
+evidence:
+  ring_buffer_s: 15.0
+  pre_event_s: 5.0
+  post_event_s: 5.0
+  retention_days: 30
+  face_blur: false
+
+# LLM summarizer — leave empty to use template fallback (fully offline)
+llm:
+  provider: ""     # "anthropic" | "gemini" | ""
+  model: ""
+  api_key: ""
+
+sim_mode: false
+debug: false

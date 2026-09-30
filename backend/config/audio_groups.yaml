@@ -1,0 +1,44 @@
+# ──────────────────────────────────────────────────────────────────────
+# Spectra — Audio Threat Group Mapping
+# ──────────────────────────────────────────────────────────────────────
+# Maps AudioSet class labels → threat groups used by the fusion engine.
+# Edit this file to customize which sounds are considered threats.
+# Labels are matched case-insensitively against the AST model output.
+
+groups:
+  scream:
+    labels:
+      - "Screaming"
+      - "Shout"
+      - "Yell"
+      - "Crying"
+      - "Sobbing"
+      - "Wail"
+    weight: 1.0
+
+  gunshot:
+    labels:
+      - "Gunshot, gunfire"
+      - "Machine gun"
+      - "Explosion"
+      - "Cap gun"
+    weight: 1.0
+    hard_trigger: true   # Can reach HIGH alone (see fusion.yaml gunshot_hard_trigger)
+
+  glass:
+    labels:
+      - "Glass"
+      - "Shatter"
+      - "Breaking"
+    weight: 0.7
+
+  ambient_panic:
+    labels:
+      - "Crowd"
+      - "Stampede"
+      - "Alarm"
+      - "Siren"
+      - "Emergency vehicle"
+    weight: 0.5
+
+# Labels not in any group are ignored (ambient noise, music, speech, etc.)
