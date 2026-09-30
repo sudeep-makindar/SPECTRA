@@ -5,6 +5,7 @@
  */
 
 import { useState } from 'react';
+import { AreaChart, Area, ResponsiveContainer, YAxis } from 'recharts';
 import { useSpectraSocket } from '../hooks/useSpectraSocket';
 import { AddSourceDialog } from '../components/AddSourceDialog';
 
@@ -124,20 +125,25 @@ export function OverviewPage() {
       {/* Density sparkline (sage) */}
       <div className="card card-sage" style={{ gridColumn: 'span 1' }}>
         <div className="card-label">Crowd Density</div>
-        <div style={{ height: '60px', display: 'flex', alignItems: 'flex-end' }}>
-          {/* Placeholder sparkline — replaced with Recharts in Phase 1 */}
-          <svg width="100%" height="60" viewBox="0 0 200 60" preserveAspectRatio="none">
-            <polyline
-              points="0,55 20,50 40,45 60,40 80,42 100,38 120,35 140,30 160,33 180,28 200,32"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              opacity="0.5"
-            />
-          </svg>
+        <div style={{ height: '60px', display: 'flex', alignItems: 'flex-end', marginTop: '16px' }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={state.history}>
+              <YAxis domain={[0, 1]} hide />
+              <Area 
+                type="monotone" 
+                dataKey="density" 
+                stroke="var(--color-sage)" 
+                fill="var(--color-sage)" 
+                fillOpacity={0.3} 
+                isAnimationActive={false}
+              />
+            </AreaChart>
+          </ResponsiveContainer>
         </div>
-        <div className="card-value card-value-sm tabular-nums" style={{ marginTop: '8px' }}>—</div>
-        <div style={{ fontSize: '0.7rem', opacity: 0.6, marginTop: '2px' }}>No active zone selected</div>
+        <div className="card-value card-value-sm tabular-nums" style={{ marginTop: '8px' }}>
+          {state.history.length > 0 ? (state.history[state.history.length - 1].density * 100).toFixed(0) + '%' : '—'}
+        </div>
+        <div style={{ fontSize: '0.7rem', opacity: 0.6, marginTop: '2px' }}>Peak Global Density</div>
       </div>
 
       {/* Zone controls (dark) — Exchange card equivalent */}
@@ -172,20 +178,26 @@ export function OverviewPage() {
 
       {/* Audio level sparkline (lavender) */}
       <div className="card card-lavender" style={{ gridColumn: 'span 1' }}>
-        <div className="card-label">Audio Level</div>
-        <div style={{ height: '60px', display: 'flex', alignItems: 'flex-end' }}>
-          <svg width="100%" height="60" viewBox="0 0 200 60" preserveAspectRatio="none">
-            <polyline
-              points="0,50 15,48 30,35 45,52 60,30 75,55 90,25 105,45 120,50 135,42 150,38 165,45 180,40 200,48"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              opacity="0.5"
-            />
-          </svg>
+        <div className="card-label">Audio Threat Level</div>
+        <div style={{ height: '60px', display: 'flex', alignItems: 'flex-end', marginTop: '16px' }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={state.history}>
+              <YAxis domain={[0, 1]} hide />
+              <Area 
+                type="stepAfter" 
+                dataKey="audio" 
+                stroke="var(--color-lavender)" 
+                fill="var(--color-lavender)" 
+                fillOpacity={0.3} 
+                isAnimationActive={false}
+              />
+            </AreaChart>
+          </ResponsiveContainer>
         </div>
-        <div className="card-value card-value-sm tabular-nums" style={{ marginTop: '8px' }}>—</div>
-        <div style={{ fontSize: '0.7rem', opacity: 0.6, marginTop: '2px' }}>No audio sources</div>
+        <div className="card-value card-value-sm tabular-nums" style={{ marginTop: '8px' }}>
+          {state.history.length > 0 ? (state.history[state.history.length - 1].audio * 100).toFixed(0) + '%' : '—'}
+        </div>
+        <div style={{ fontSize: '0.7rem', opacity: 0.6, marginTop: '2px' }}>Peak Audio Score</div>
       </div>
     </div>
   );
