@@ -124,7 +124,7 @@ class PerceptionManager:
             }
         else:
             v_result, m_result = await asyncio.gather(
-                asyncio.to_thread(yolo.predict, packet.payload),
+                asyncio.to_thread(yolo.predict, {"source_id": packet.source_id, "frame": packet.payload}),
                 asyncio.to_thread(motion.predict, {"source_id": packet.source_id, "frame": packet.payload})
             )
             
@@ -137,7 +137,11 @@ class PerceptionManager:
             modality="vision",
             score=v_result["density_score"],
             ts_capture=packet.ts_capture,
-            metadata={"count": v_result["person_count"]}
+            metadata={
+                "count": v_result["person_count"],
+                "avg_velocity": v_result.get("avg_velocity", 0.0),
+                "chaos_index": v_result.get("chaos_index", 0.0)
+            }
         )
         logger.debug("Vision: source=%s score=%.2f latency=%.2fs", packet.source_id, v_sample.score, latency)
         if self.on_sample:
