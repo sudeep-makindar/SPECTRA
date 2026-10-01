@@ -18,6 +18,7 @@ from app.perception.schema import RiskSample
 from app.models.registry import ModelRegistry
 from app.core.metrics import MetricsCollector
 from app.core.device import get_device
+from app.evidence.manager import EvidenceManager
 
 logger = logging.getLogger("spectra.perception.workers")
 
@@ -85,6 +86,10 @@ class PerceptionManager:
         """Route a packet to the appropriate models."""
         if not self._is_running:
             return
+
+        # Always add packet to Evidence buffer for Phase 4 recording
+        evidence = EvidenceManager.instance()
+        evidence.add_frame(packet)
 
         if packet.kind == SourceKind.VIDEO:
             # Dispatch to vision and motion workers concurrently

@@ -8,9 +8,11 @@ import { useState } from 'react';
 import { AreaChart, Area, ResponsiveContainer, YAxis } from 'recharts';
 import { useSpectraSocket } from '../hooks/useSpectraSocket';
 import { AddSourceDialog } from '../components/AddSourceDialog';
+import { IncidentReplayModal } from '../components/IncidentReplayModal';
 
 export function OverviewPage() {
   const [isAddSourceOpen, setIsAddSourceOpen] = useState(false);
+  const [isReplayOpen, setIsReplayOpen] = useState(false);
   const state = useSpectraSocket();
 
   const activeSources = state.active_sources;
@@ -34,6 +36,10 @@ export function OverviewPage() {
           onSourceAdded={() => {}} 
         />
       )}
+      {isReplayOpen && (
+        <IncidentReplayModal onClose={() => setIsReplayOpen(false)} />
+      )}
+      
       {/* Headline stat card (cream) — Total Headcount */}
       <div className="card card-cream" style={{ gridColumn: 'span 1' }}>
         <div className="card-label">Active Sources</div>
@@ -104,7 +110,11 @@ export function OverviewPage() {
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 13L13 1M13 1H5M13 1v8" /></svg>
           </div>
         </div>
-        <div className="card card-lavender" style={{ flex: 1, display: 'flex', alignItems: 'flex-end', cursor: 'pointer' }}>
+        <div 
+          className="card card-lavender" 
+          style={{ flex: 1, display: 'flex', alignItems: 'flex-end', cursor: 'pointer' }}
+          onClick={() => setIsReplayOpen(true)}
+        >
           <div className="card-title-display">INCIDENT REPLAY</div>
           <div className="card-corner-icon">
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 13L13 1M13 1H5M13 1v8" /></svg>

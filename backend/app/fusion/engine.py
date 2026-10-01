@@ -231,5 +231,6 @@ class FusionEngine:
 
     def _trigger_incident(self, zone: ZoneState) -> None:
         """Called when a zone enters the Critical state."""
-        # This will be implemented in Phase 4: Alerts & Evidence
+        from app.evidence.manager import EvidenceManager
         logger.warning("INCIDENT TRIGGERED IN ZONE: %s (Risk: %.2f)", zone.name, zone.risk_score)
+        EvidenceManager.instance().trigger_incident(zone.zone_id)

@@ -25,6 +25,8 @@ from app.ws.handlers import router as ws_router
 from app.ingest.registry import SourceRegistry
 from app.perception.workers import PerceptionManager
 from app.fusion.engine import FusionEngine
+from app.evidence.manager import EvidenceManager
+from app.api.incidents import router as incidents_router
 
 # ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -74,6 +76,10 @@ async def lifespan(app: FastAPI):
             )
             await registry.start_source(f"sim-{i+1}")
 
+    # Start Evidence Manager (Phase 4)
+    evidence = EvidenceManager.instance()
+    await evidence.start()
+
     # Start Fusion Engine
     fusion = FusionEngine.instance()
     await fusion.start()
@@ -91,6 +97,7 @@ async def lifespan(app: FastAPI):
     
     await perception.stop()
     await fusion.stop()
+    await evidence.stop()
     
     await registry.stop_all()
     logger.info("All sources stopped. Goodbye.")
@@ -119,6 +126,7 @@ def create_app() -> FastAPI:
 
     # API routes
     app.include_router(api_router, prefix="/api")
+    app.include_router(incidents_router)
 
     # WebSocket routes
     app.include_router(ws_router)
