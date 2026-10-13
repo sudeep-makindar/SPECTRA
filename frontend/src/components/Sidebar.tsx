@@ -1,131 +1,99 @@
 /**
- * Sidebar navigation — matches the Stoken reference:
- * - Lavender background, full height, rounded
- * - Logo at top
- * - Nav items with icons; active item is huge uppercase in a bordered pill
- * - Bottom section: Search, Account, Log Out, theme toggle
+ * Sidebar — grouped navigation with live badges and a system-health footer.
  */
 
-import { NavLink, useLocation } from 'react-router-dom';
+import { useState } from 'react';
+import { NavLink } from 'react-router-dom';
+import { Activity, LayoutDashboard, Map, PanelLeftClose, PanelLeftOpen, Radio, Siren, Video } from 'lucide-react';
+import type { ReactNode } from 'react';
 import { SpectraWordmark } from './Logo';
+import { useSpectra } from '../context/SpectraContext';
 
-// Simple inline SVG icons — keeps dependencies minimal
-const icons = {
-  overview: (
-    <svg viewBox="0 0 20 20" fill="currentColor" className="nav-icon">
-      <rect x="2" y="2" width="7" height="7" rx="1.5" />
-      <rect x="11" y="2" width="7" height="7" rx="1.5" />
-      <rect x="2" y="11" width="7" height="7" rx="1.5" />
-      <rect x="11" y="11" width="7" height="7" rx="1.5" />
-    </svg>
-  ),
-  liveOps: (
-    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" className="nav-icon">
-      <circle cx="10" cy="10" r="3" />
-      <path d="M5.5 5.5a6.5 6.5 0 0 1 9 0" strokeLinecap="round" />
-      <path d="M3 3a10 10 0 0 1 14 0" strokeLinecap="round" />
-    </svg>
-  ),
-  zones: (
-    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" className="nav-icon">
-      <rect x="2" y="3" width="16" height="14" rx="2" />
-      <line x1="9" y1="3" x2="9" y2="17" />
-      <line x1="2" y1="10" x2="18" y2="10" />
-    </svg>
-  ),
-  incidents: (
-    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" className="nav-icon">
-      <path d="M10 2L18 17H2L10 2Z" strokeLinejoin="round" />
-      <line x1="10" y1="8" x2="10" y2="12" strokeLinecap="round" />
-      <circle cx="10" cy="14.5" r="0.5" fill="currentColor" />
-    </svg>
-  ),
-  system: (
-    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" className="nav-icon">
-      <circle cx="10" cy="10" r="7" />
-      <path d="M10 6v4l2.5 2.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  ),
-  search: (
-    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" className="nav-icon">
-      <circle cx="9" cy="9" r="5" />
-      <line x1="13" y1="13" x2="17" y2="17" strokeLinecap="round" />
-    </svg>
-  ),
-  account: (
-    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" className="nav-icon">
-      <circle cx="10" cy="7" r="3" />
-      <path d="M4 17c0-3.3 2.7-6 6-6s6 2.7 6 6" strokeLinecap="round" />
-    </svg>
-  ),
-  logout: (
-    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" className="nav-icon">
-      <path d="M7 3H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h3" strokeLinecap="round" />
-      <path d="M10 10h7m0 0l-3-3m3 3l-3 3" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  ),
-};
+interface Item { to: string; label: string; icon: ReactNode; badge?: ReactNode }
 
-const navItems = [
-  { path: '/', label: 'Overview', icon: icons.overview },
-  { path: '/live', label: 'Live Ops', icon: icons.liveOps },
-  { path: '/zones', label: 'Zones', icon: icons.zones },
-  { path: '/incidents', label: 'Incidents', icon: icons.incidents },
-  { path: '/system', label: 'System', icon: icons.system },
-];
+export function Sidebar() {
+  const { incidents, zones, active_sources, total_sources, connected, health, metrics } = useSpectra();
+  const [collapsed, setCollapsed] = useState(() => {
+    try { return localStorage.getItem('spectra.sidebar') === 'collapsed'; } catch { return false; }
+  });
+  const toggle = () => {
+    setCollapsed(c => {
+      try { localStorage.setItem('spectra.sidebar', c ? 'open' : 'collapsed'); } catch { /* ignore */ }
+      return !c;
+    });
+  };
 
-interface SidebarProps {
-  onThemeToggle?: () => void;
-  isDarkMode?: boolean;
-}
+  const open = incidents.filter(i => !i.ended_at && i.status !== 'resolved');
+  const anyCritical = Object.values(zones).some(z => z.alert_level === 'critical');
+  const loaded = health?.models.filter(m => m.status === 'loaded').length ?? 0;
+  const e2e = metrics.latencies?.e2e?.p95;
 
-export function Sidebar({ onThemeToggle, isDarkMode = true }: SidebarProps) {
-  const location = useLocation();
+  const groups: { title: string; items: Item[] }[] = [
+    {
+      title: 'Monitor',
+      items: [
+        { to: '/', label: 'Command Center', icon: <LayoutDashboard /> },
+        { to: '/live', label: 'Live Feeds', icon: <Video /> },
+        {
+          to: '/incidents', label: 'Incidents', icon: <Siren />,
+          badge: open.length ? <span className={`nav-badge ${anyCritical ? 'alert' : 'warn'}`}>{open.length}</span> : null,
+        },
+      ],
+    },
+    {
+      title: 'Configure',
+      items: [
+        { to: '/zones', label: 'Zones', icon: <Map /> },
+        { to: '/devices', label: 'Devices', icon: <Radio />, badge: <span className="nav-badge">{active_sources}/{total_sources}</span> },
+      ],
+    },
+    {
+      title: 'Insights',
+      items: [{ to: '/system', label: 'Performance', icon: <Activity /> }],
+    },
+  ];
 
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar ${collapsed ? 'collapsed' : ''}`}>
       <SpectraWordmark />
-
-      <nav className="sidebar-nav">
-        {navItems.map((item) => {
-          const isActive = item.path === '/'
-            ? location.pathname === '/'
-            : location.pathname.startsWith(item.path);
-
-          return (
-            <NavLink
-              key={item.path}
-              to={item.path}
-              className={`nav-item ${isActive ? 'active' : ''}`}
-            >
-              {item.icon}
-              <span>{item.label}</span>
-            </NavLink>
-          );
-        })}
+      <nav style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+        {groups.map(g => (
+          <div key={g.title} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <div className="nav-section">{g.title}</div>
+            {g.items.map(it => (
+              <NavLink key={it.to} to={it.to} end={it.to === '/'} title={it.label}
+                className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+                {it.icon}
+                <span className="nav-label">{it.label}</span>
+                {it.badge}
+              </NavLink>
+            ))}
+          </div>
+        ))}
       </nav>
 
-      <div className="sidebar-bottom">
-        <button className="nav-item" type="button">
-          {icons.search}
-          <span>Search</span>
-        </button>
-        <button className="nav-item" type="button">
-          {icons.account}
-          <span>Account</span>
-        </button>
-        <button className="nav-item" type="button">
-          {icons.logout}
-          <span>Log Out</span>
-        </button>
-
-        <button
-          className={`theme-toggle ${isDarkMode ? '' : 'light'}`}
-          onClick={onThemeToggle}
-          type="button"
-          aria-label="Toggle dark/light mode"
-        />
+      <div className="health">
+        <div className="card-label" style={{ marginBottom: 0 }}>System health</div>
+        <div className="health-row">
+          <span>Pipeline</span>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span className={`status-dot ${connected ? 'status-dot-online' : 'status-dot-error'}`} />
+            <b>{connected ? 'Live' : 'Reconnecting'}</b>
+          </span>
+        </div>
+        <div className="health-row"><span>AI models</span><b>{health ? `${loaded}/${health.models.length} loaded` : '—'}</b></div>
+        <div className="health-row"><span>Latency p95</span><b className="num">{e2e != null ? `${Math.round(e2e)} ms` : '—'}</b></div>
+        <div className="health-row" title={health?.copilot.last_error ?? ''}>
+          <span>Co-pilot</span>
+          <b style={{ color: health?.copilot.enabled ? undefined : 'var(--color-text-muted)' }}>
+            {health ? (health.copilot.enabled ? health.copilot.provider_label : 'Offline') : '—'}
+          </b>
+        </div>
       </div>
+      <button className="nav-item collapse-btn" onClick={toggle} title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}>
+        {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
+        <span className="nav-label">Collapse</span>
+      </button>
     </aside>
   );
 }

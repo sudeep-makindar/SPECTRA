@@ -26,7 +26,17 @@ const INITIAL: LiveState = {
   total_sources: 0,
 };
 
+export interface Health {
+  device: { selected_device: string; pytorch_version: string | null; mps_available: boolean };
+  models: { key: string; status: string; name?: string; version?: string; device?: string }[];
+  copilot: { enabled: boolean; provider: string; provider_label: string; model: string; key_env: string | null; last_error: string | null; calls: number };
+  face_blur: boolean;
+}
+
 interface Ctx extends LiveState {
+  health: Health | null;
+  drillOpen: boolean;
+  setDrillOpen: (o: boolean) => void;
   muted: boolean;
   setMuted: (m: boolean) => void;
   focusZone: string | null;
@@ -66,6 +76,15 @@ export function SpectraProvider({ children }: { children: ReactNode }) {
     try { return localStorage.getItem('spectra.muted') === '1'; } catch { return false; }
   });
   const [focusZone, setFocusZone] = useState<string | null>(null);
+  const [health, setHealth] = useState<Health | null>(null);
+  const [drillOpen, setDrillOpen] = useState(false);
+
+  useEffect(() => {
+    const load = () => api<Health>('/api/health').then(setHealth).catch(() => setHealth(null));
+    load();
+    const t = setInterval(load, 8000);
+    return () => clearInterval(t);
+  }, []);
   const wsRef = useRef<WebSocket | null>(null);
   const retryRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const lastToneRef = useRef<Record<string, string>>({});
@@ -165,7 +184,7 @@ export function SpectraProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [acknowledgeAll, alarmZones, muted, setMuted, state.zones]);
 
-  const value: Ctx = { ...state, muted, setMuted, focusZone, setFocusZone, alarmZones, acknowledgeAll };
+  const value: Ctx = { ...state, health, drillOpen, setDrillOpen, muted, setMuted, focusZone, setFocusZone, alarmZones, acknowledgeAll };
   return <SpectraContext.Provider value={value}>{children}</SpectraContext.Provider>;
 }
 

@@ -9,7 +9,7 @@ zones/incidents pages were stubs). As of Phase 5:
   the eval harness. `tests/test_fusion.py` pins its safety properties.
 - **Zones** (`app/zones/manager.py`, persisted to `data/zones.json`) carry floor area → people/m² → Fruin LoS.
 - **Incidents** (`app/incidents/store.py`, JSON per incident in `data/incidents/`), evidence clips with head anonymisation.
-- **Claude co-pilot** (`app/ai/copilot.py`, `claude-opus-5-5`, metadata only, template fallback). Key in `.env` as `ANTHROPIC_API_KEY`.
+- **AI co-pilot** (`app/ai/copilot.py` on `app/ai/llm.py`): any OpenAI-compatible provider via `LLM_PROVIDER` (groq default, xai, openrouter, gemini, ollama); key in `.env` (e.g. `GROQ_API_KEY`). Metadata only, template fallback, auto-switches if the configured model is retired.
 - **Scenario director** (`app/scenarios/director.py`), **eval harness** (`app/evaluation/harness.py`, CLI `python -m tests.eval_harness`).
 - **Frontend**: single `SpectraProvider` WebSocket (`src/context/SpectraContext.tsx`), shared types in `src/lib/types.ts`.
   Series colours were validated for CVD/contrast; risk tiers use the reserved status palette.

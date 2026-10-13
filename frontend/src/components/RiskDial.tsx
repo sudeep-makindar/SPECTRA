@@ -19,17 +19,17 @@ export function RiskDial({ risk, level, size = 112, stroke = 10, label }: Props)
   return (
     <div style={{ position: 'relative', width: size, height: size, flexShrink: 0 }}>
       <svg width={size} height={size} style={{ transform: 'rotate(135deg)' }} aria-hidden>
-        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--color-charcoal-lighter)"
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--color-surface-3)"
           strokeWidth={stroke} strokeDasharray={`${arc} ${c}`} strokeLinecap="round" />
         <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={LEVEL_COLOR[lvl]}
           strokeWidth={stroke} strokeDasharray={`${filled} ${c}`} strokeLinecap="round"
           style={{ transition: 'stroke-dasharray 400ms cubic-bezier(0.16,1,0.3,1), stroke 300ms' }} />
       </svg>
       <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-        <span className="tabular-nums" style={{ fontSize: size * 0.26, fontWeight: 700, letterSpacing: '-0.03em', lineHeight: 1 }}>
+        <span className="num" style={{ fontSize: size * 0.26, fontWeight: 600, letterSpacing: '-0.03em', lineHeight: 1 }}>
           {Math.round(risk * 100)}
         </span>
-        <span style={{ fontSize: Math.max(9, size * 0.085), opacity: 0.6, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', marginTop: 2 }}>
+        <span style={{ fontSize: Math.max(9, size * 0.085), color: 'var(--color-text-muted)', fontWeight: 500, letterSpacing: '0.06em', textTransform: 'uppercase', marginTop: 2 }}>
           {label ?? 'risk'}
         </span>
       </div>

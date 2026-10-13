@@ -139,17 +139,17 @@ export function NodePage() {
 
   const alarm = zone.level === 'high' || zone.level === 'critical';
   return (
-    <div style={{ minHeight: '100vh', padding: 16, background: alarm ? (zone.level === 'critical' ? '#5a1416' : '#4a2a14') : '#0C0C0F', transition: 'background 300ms' }}>
+    <div className={`node-page ${alarm ? `alarm-${zone.level}` : ''}`}>
       <div style={{ maxWidth: 560, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div style={{ transform: 'scale(0.85)', transformOrigin: 'left' }}><SpectraWordmark /></div>
-          <span className="chip">{name}</span>
+          <SpectraWordmark subtitle="Sensor node" />
+          <span className="tag">{name}</span>
         </div>
 
         {alarm && (
-          <div className="alert-banner" style={{ margin: 0 }}>
-            <span className="display">{zone.level}</span>
-            <div><b>{zone.name}</b><div style={{ fontSize: '0.8rem' }}>Check the control room for instructions.</div></div>
+          <div className={`alert-banner ${zone.level === 'critical' ? '' : 'high'}`}>
+            <span className={`level-pill level-${zone.level}`}>{zone.level}</span>
+            <div><div className="alert-banner-title">{zone.name}</div><div className="alert-banner-sub">Check the control room for instructions.</div></div>
           </div>
         )}
 
@@ -158,7 +158,7 @@ export function NodePage() {
           {status !== 'streaming' && <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }} className="dim">Camera off</div>}
           {status === 'streaming' && (
             <div className="camera-overlay-top">
-              <span className="badge badge-live">LIVE</span>
+              <span className="badge badge-live">Live</span>
               <span style={{ fontSize: '0.72rem', color: '#fff' }}>{zone.name ? `Zone: ${zone.name}` : ''}</span>
             </div>
           )}
@@ -167,27 +167,27 @@ export function NodePage() {
 
         {status === 'streaming' ? (
           <>
-            <div className="card card-dark" style={{ padding: 14, display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
+            <div className="card" style={{ padding: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.8rem' }}>
               <span>📷 {stats.frames} frames</span>
               <span>🎙 {withAudio ? `${Math.round(stats.audioKb)} KB` : 'off'}</span>
               <span className={`level-pill level-${zone.level ?? 'normal'}`}>{zone.level ?? '—'}</span>
             </div>
-            <button className="pill-btn pill-btn-outlined" style={{ color: 'var(--color-cream)' }} onClick={() => stop()}>Stop streaming</button>
+            <button className="btn btn-block" onClick={() => stop()}>Stop streaming</button>
           </>
         ) : (
-          <div className="card card-dark" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {!params.get('token') && (
-              <div className="input-group"><div className="input-chip">Token</div><input value={token} onChange={e => setToken(e.target.value)} placeholder="Paste token" /></div>
+              <label className="field">Pairing token<input className="text-input mono" value={token} onChange={e => setToken(e.target.value)} placeholder="Paste token" /></label>
             )}
             <label style={{ display: 'flex', gap: 8, fontSize: '0.85rem', alignItems: 'center' }}>
-              <input type="checkbox" checked={withAudio} onChange={e => setWithAudio(e.target.checked)} style={{ accentColor: '#9D8DF7' }} /> Stream microphone (scream / keyword detection)
+              <input type="checkbox" checked={withAudio} onChange={e => setWithAudio(e.target.checked)} style={{ accentColor: '#4F8DF7' }} /> Stream microphone (scream / keyword detection)
             </label>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button className={`btn ${facing === 'environment' ? 'btn-primary' : ''}`} onClick={() => setFacing('environment')}>Rear camera</button>
-              <button className={`btn ${facing === 'user' ? 'btn-primary' : ''}`} onClick={() => setFacing('user')}>Front camera</button>
+            <div className="segmented" style={{ alignSelf: 'flex-start' }}>
+              <button className={facing === 'environment' ? 'on' : ''} onClick={() => setFacing('environment')}>Rear camera</button>
+              <button className={facing === 'user' ? 'on' : ''} onClick={() => setFacing('user')}>Front camera</button>
             </div>
             {err && <div style={{ color: 'var(--color-error)', fontSize: '0.82rem' }}>{err}</div>}
-            <button className="pill-btn pill-btn-light" disabled={status === 'connecting'} onClick={start}>
+            <button className="btn btn-primary btn-block" style={{ padding: '11px 14px' }} disabled={status === 'connecting'} onClick={start}>
               {status === 'connecting' ? 'Connecting…' : 'Start streaming'}
             </button>
             <div className="dim" style={{ fontSize: '0.7rem', lineHeight: 1.5 }}>

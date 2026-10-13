@@ -20,7 +20,7 @@ from app.core.config import load_config, DATA_DIR, PROJECT_ROOT
 
 
 def _load_dotenv() -> None:
-    """Minimal .env loader (project root) so ANTHROPIC_API_KEY can live in .env."""
+    """Minimal .env loader (project root) so LLM keys (e.g. GROQ_API_KEY) can live in .env."""
     import os
     env = PROJECT_ROOT / ".env"
     if not env.exists():
@@ -108,7 +108,8 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_eval())
 
     from app.ai.copilot import Copilot
-    logger.info("Claude co-pilot: %s", Copilot.instance().status()["model"])
+    st = Copilot.instance().status()
+    logger.info("AI co-pilot: %s · %s", st["provider_label"], st["model"])
 
     # Start Evidence Manager (Phase 4)
     evidence = EvidenceManager.instance()

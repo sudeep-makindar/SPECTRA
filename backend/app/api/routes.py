@@ -349,7 +349,7 @@ async def stop_scenario(zone_id: Optional[str] = None) -> dict:
     return {"status": "stopped"}
 
 
-# ── Claude co-pilot ───────────────────────────────────────────────────
+# ── AI co-pilot ───────────────────────────────────────────────────────
 
 class AskRequest(BaseModel):
     question: str

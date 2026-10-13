@@ -1,5 +1,5 @@
 /**
- * Connect Device — add sources in one click:
+ * Connect device — add a sensor in one step:
  *  - this Mac's camera / microphone
  *  - a phone (scan a QR code → /node streams camera + mic)
  *  - a video file or RTSP / IP-camera URL
@@ -7,16 +7,17 @@
 
 import { useEffect, useState } from 'react';
 import QRCode from 'qrcode';
+import { Camera, Link, Mic, Smartphone, X } from 'lucide-react';
 import { useSpectra } from '../context/SpectraContext';
 import { api } from '../lib/types';
 
-interface Props { onClose: () => void; onSourceAdded?: () => void }
+export type ConnectTab = 'phone' | 'mac' | 'url';
 
-type Tab = 'phone' | 'mac' | 'url';
+interface Props { onClose: () => void; initialTab?: ConnectTab }
 
-export function AddSourceDialog({ onClose, onSourceAdded }: Props) {
+export function AddSourceDialog({ onClose, initialTab = 'phone' }: Props) {
   const { zone_configs, focusZone } = useSpectra();
-  const [tab, setTab] = useState<Tab>('phone');
+  const [tab, setTab] = useState<ConnectTab>(initialTab);
   const [zone, setZone] = useState(focusZone ?? zone_configs[0]?.id ?? '');
   const [name, setName] = useState('');
   const [url, setUrl] = useState('');
@@ -27,16 +28,19 @@ export function AddSourceDialog({ onClose, onSourceAdded }: Props) {
   const [ip, setIp] = useState('');
 
   useEffect(() => {
-    api<{ lan_ips: string[] }>('/api/network').then(r => { setIps(r.lan_ips); setIp(r.lan_ips[0] ?? window.location.hostname); }).catch(() => setIp(window.location.hostname));
-  }, []);
+    api<{ lan_ips: string[] }>('/api/network')
+      .then(r => { setIps(r.lan_ips); setIp(r.lan_ips[0] ?? window.location.hostname); })
+      .catch(() => setIp(window.location.hostname));
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
 
   const create = async (body: Record<string, unknown>) => {
     setBusy(true);
     setError(null);
     try {
-      const r = await api<{ id: string; token: string; name: string }>('/api/sources', { method: 'POST', json: { zone_id: zone, config: { fps: 5 }, ...body } });
-      onSourceAdded?.();
-      return r;
+      return await api<{ id: string; token: string; name: string }>('/api/sources', { method: 'POST', json: { zone_id: zone, config: { fps: 5 }, ...body } });
     } catch (e) {
       setError((e as Error).message);
       return null;
@@ -49,9 +53,10 @@ export function AddSourceDialog({ onClose, onSourceAdded }: Props) {
     const n = name || `Phone ${Math.floor(Math.random() * 90 + 10)}`;
     const r = await create({ name: n, kind: 'video', adapter: 'browser_node' });
     if (!r) return;
-    const host = ip && !['localhost', '127.0.0.1'].includes(window.location.hostname) ? window.location.host : `${ip}:${window.location.port || '5173'}`;
+    const local = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+    const host = local ? `${ip}:${window.location.port || '5173'}` : window.location.host;
     const link = `https://${host}/node?token=${r.token}&name=${encodeURIComponent(n)}`;
-    const qr = await QRCode.toDataURL(link, { margin: 1, width: 260, color: { dark: '#1B1B1F', light: '#F2F2EE' } });
+    const qr = await QRCode.toDataURL(link, { margin: 1, width: 240, color: { dark: '#0A0E13', light: '#FFFFFF' } });
     setPairing({ link, qr, name: n });
   };
 
@@ -69,77 +74,92 @@ export function AddSourceDialog({ onClose, onSourceAdded }: Props) {
   };
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="card card-dark modal" onClick={e => e.stopPropagation()} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-        <div className="section-title" style={{ marginBottom: 0 }}>
-          <div className="display" style={{ fontSize: '1.8rem' }}>Connect Device</div>
-          <button className="btn btn-sm btn-ghost" onClick={onClose}>✕</button>
-        </div>
-
-        <div style={{ display: 'flex', gap: 6 }}>
-          {(['phone', 'mac', 'url'] as Tab[]).map(t => (
-            <button key={t} className={`btn ${tab === t ? 'btn-primary' : ''}`} onClick={() => { setTab(t); setPairing(null); }}>
-              {t === 'phone' ? '📱 Phone' : t === 'mac' ? '💻 This Mac' : '🎞 Video / RTSP'}
-            </button>
-          ))}
-        </div>
-
-        <div style={{ display: 'flex', gap: 8 }}>
-          <select className="text-input" value={zone} onChange={e => setZone(e.target.value)} style={{ flex: 1 }}>
-            {zone_configs.map(z => <option key={z.id} value={z.id}>Zone: {z.name}</option>)}
-          </select>
-          <input className="text-input" placeholder="Name (optional)" value={name} onChange={e => setName(e.target.value)} />
-        </div>
-
-        {tab === 'phone' && !pairing && (
-          <>
-            <div className="muted" style={{ fontSize: '0.8rem', lineHeight: 1.5 }}>
-              Generates a one-time token and a QR code. Scan it with a phone on the same Wi-Fi; the phone streams its camera and microphone, and all AI runs on this Mac.
+    <>
+      <div className="overlay" onClick={onClose} />
+      <div className="modal-wrap" onClick={onClose}>
+        <div className="modal" onClick={e => e.stopPropagation()} role="dialog" aria-label="Connect device" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div className="card-head" style={{ marginBottom: 0 }}>
+            <div>
+              <div style={{ fontSize: '1.05rem', fontWeight: 600 }}>Connect a device</div>
+              <div className="dim" style={{ fontSize: '0.78rem', marginTop: 2 }}>All AI runs on this machine. Feeds never leave the local network.</div>
             </div>
-            {ips.length > 1 && (
-              <select className="text-input" value={ip} onChange={e => setIp(e.target.value)}>
-                {ips.map(x => <option key={x}>{x}</option>)}
+            <button className="btn btn-ghost btn-sm" onClick={onClose} aria-label="Close"><X /></button>
+          </div>
+
+          <div className="segmented">
+            <button className={tab === 'phone' ? 'on' : ''} onClick={() => { setTab('phone'); setPairing(null); }}><Smartphone size={15} /> Phone</button>
+            <button className={tab === 'mac' ? 'on' : ''} onClick={() => setTab('mac')}><Camera size={15} /> This Mac</button>
+            <button className={tab === 'url' ? 'on' : ''} onClick={() => setTab('url')}><Link size={15} /> Stream / file</button>
+          </div>
+
+          <div className="field-row">
+            <label className="field">Zone
+              <select className="select" value={zone} onChange={e => setZone(e.target.value)}>
+                {zone_configs.map(z => <option key={z.id} value={z.id}>{z.name}</option>)}
               </select>
-            )}
-            <button className="btn btn-primary" disabled={busy} onClick={pairPhone}>Generate pairing QR</button>
-          </>
-        )}
-        {tab === 'phone' && pairing && (
-          <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
-            <img src={pairing.qr} alt="Pairing QR code" style={{ width: 200, height: 200, borderRadius: 16 }} />
-            <div style={{ flex: 1, minWidth: 200, display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <b>Scan with {pairing.name}</b>
-              <div className="dim" style={{ fontSize: '0.74rem', lineHeight: 1.5 }}>
-                1. Phone and Mac on the same Wi-Fi.<br />
-                2. Accept the self-signed certificate warning (needed for camera access).<br />
-                3. Tap <b>Start streaming</b>. The tile appears in Live Ops.
+            </label>
+            <label className="field">Name
+              <input className="text-input" placeholder="Optional" value={name} onChange={e => setName(e.target.value)} />
+            </label>
+          </div>
+
+          {tab === 'phone' && !pairing && (
+            <>
+              <p className="muted" style={{ fontSize: '0.8rem', lineHeight: 1.55 }}>
+                Creates a one-time pairing link. The phone streams its camera and microphone and becomes a steward pager: its screen turns red and it vibrates when its zone alarms.
+              </p>
+              {ips.length > 1 && (
+                <label className="field">Network interface
+                  <select className="select" value={ip} onChange={e => setIp(e.target.value)}>{ips.map(x => <option key={x}>{x}</option>)}</select>
+                </label>
+              )}
+              <button className="btn btn-primary" disabled={busy || !zone} onClick={pairPhone}>Generate pairing QR code</button>
+            </>
+          )}
+          {tab === 'phone' && pairing && (
+            <div style={{ display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap' }}>
+              <img src={pairing.qr} alt="Pairing QR code" style={{ width: 180, height: 180, borderRadius: 10, background: '#fff', padding: 6 }} />
+              <div style={{ flex: 1, minWidth: 220, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <b style={{ fontWeight: 600 }}>Scan with {pairing.name}</b>
+                <ol className="muted" style={{ fontSize: '0.78rem', lineHeight: 1.6, paddingLeft: 16 }}>
+                  <li>Phone on the same Wi-Fi as this Mac</li>
+                  <li>Accept the certificate warning (needed for camera access)</li>
+                  <li>Tap <b>Start streaming</b></li>
+                </ol>
+                <input className="text-input mono" readOnly value={pairing.link} onFocus={e => e.target.select()} style={{ fontSize: '0.7rem' }} />
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button className="btn" onClick={() => setPairing(null)}>Pair another</button>
+                  <button className="btn btn-primary" onClick={onClose}>Done</button>
+                </div>
               </div>
-              <input className="text-input mono" readOnly value={pairing.link} onFocus={e => e.target.select()} style={{ fontSize: '0.68rem' }} />
-              <button className="btn" onClick={() => setPairing(null)}>Pair another phone</button>
             </div>
-          </div>
-        )}
+          )}
 
-        {tab === 'mac' && (
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-            <button className="scenario-btn" disabled={busy} onClick={() => addMac('cam')}>
-              <b>Camera</b><span className="dim" style={{ fontSize: '0.72rem' }}>Built-in FaceTime camera at 5 fps → YOLO + optical flow</span>
-            </button>
-            <button className="scenario-btn" disabled={busy} onClick={() => addMac('mic')}>
-              <b>Microphone</b><span className="dim" style={{ fontSize: '0.72rem' }}>16 kHz → AST threat classes + Whisper keywords</span>
-            </button>
-          </div>
-        )}
+          {tab === 'mac' && (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <button className="option-card" disabled={busy} onClick={() => addMac('cam')}>
+                <b style={{ display: 'flex', gap: 8, alignItems: 'center' }}><Camera size={16} /> Camera</b>
+                <span>Built-in camera at 5 fps → person tracking + optical flow</span>
+              </button>
+              <button className="option-card" disabled={busy} onClick={() => addMac('mic')}>
+                <b style={{ display: 'flex', gap: 8, alignItems: 'center' }}><Mic size={16} /> Microphone</b>
+                <span>16 kHz → scream / gunshot classes + distress keywords</span>
+              </button>
+            </div>
+          )}
 
-        {tab === 'url' && (
-          <>
-            <input className="text-input mono" placeholder="/path/to/crowd.mp4  or  rtsp://…  or  http://phone:8080/video" value={url} onChange={e => setUrl(e.target.value)} />
-            <button className="btn btn-primary" disabled={busy || !url} onClick={addUrl}>Add source</button>
-          </>
-        )}
+          {tab === 'url' && (
+            <>
+              <label className="field">RTSP / HTTP stream or a video file path on this Mac
+                <input className="text-input mono" placeholder="rtsp://…  ·  http://phone:8080/video  ·  /Users/me/crowd.mp4" value={url} onChange={e => setUrl(e.target.value)} />
+              </label>
+              <button className="btn btn-primary" disabled={busy || !url} onClick={addUrl}>Add source</button>
+            </>
+          )}
 
-        {error && <div style={{ color: 'var(--color-error)', fontSize: '0.78rem' }}>{error}</div>}
+          {error && <div style={{ color: 'var(--color-error)', fontSize: '0.8rem' }}>{error}</div>}
+        </div>
       </div>
-    </div>
+    </>
   );
 }

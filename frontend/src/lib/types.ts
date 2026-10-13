@@ -129,7 +129,7 @@ export interface IncidentBrief {
   recommended_actions: BriefAction[];
   pa_announcement_en: string;
   pa_announcement_hi: string;
-  source: 'claude' | 'template';
+  source: 'llm' | 'template';
   model: string | null;
   generated_at: number;
   for_level: Level;
@@ -220,14 +220,15 @@ export const LEVEL_COLOR: Record<Level, string> = {
   critical: 'var(--color-risk-critical)',
 };
 
-/** Validated categorical slots (dark surface): vision, motion, audio. */
+/** Validated categorical slots (dark surface #10161D): vision, motion, audio. */
 export const MODALITY_COLOR = {
   vision: '#3987e5',
-  motion: '#d95926',
-  audio: '#199e70',
+  motion: '#d55181',
+  audio: '#c98500',
 } as const;
 
-export const ZONE_SERIES = ['#3987e5', '#d95926', '#199e70'];
+/** Zone lines use the same validated slots, in zone order. */
+export const ZONE_SERIES = ['#3987e5', '#d55181', '#c98500'];
 
 export function levelFromRisk(r: number): Level {
   if (r >= 0.8) return 'critical';

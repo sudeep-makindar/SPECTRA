@@ -34,13 +34,16 @@ evidence:
   retention_days: 30
   face_blur: true    # blur faces in stored incident clips (privacy by design)
 
-# Claude incident co-pilot. Only structured signal metadata is sent —
-# never video frames or audio. Set ANTHROPIC_API_KEY in the environment.
-# provider: "" falls back to offline templates.
+# AI co-pilot — any OpenAI-compatible LLM. Only structured signal metadata is
+# sent, never video or audio. Keys come from the environment / .env:
+#   groq → GROQ_API_KEY (free tier) · xai → XAI_API_KEY · openrouter → OPENROUTER_API_KEY
+#   gemini → GEMINI_API_KEY · ollama → none (fully local)
+# Without a key, briefings fall back to offline templates.
 llm:
-  provider: "anthropic"
-  model: "claude-opus-5-5"
+  provider: "groq"
+  model: ""        # empty = provider default (auto-switches if that model is retired)
   api_key: ""
+  base_url: ""
 
 sim_mode: false
 debug: false

@@ -9,7 +9,7 @@ routes each sample to its source's zone, then a 2 Hz tick per zone:
 3. runs the gated FusionCore (shared with the eval harness)
 4. writes a human-readable "why", a trend forecast, and the event log
 5. opens / escalates / closes incidents, triggering evidence clips and the
-   Claude briefing
+   AI co-pilot briefing
 """
 
 from __future__ import annotations

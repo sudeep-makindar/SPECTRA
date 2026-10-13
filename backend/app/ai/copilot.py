@@ -1,12 +1,15 @@
 """
-Claude Co-pilot — incident briefings, operator Q&A and shift handover reports.
+AI Co-pilot — incident briefings, operator Q&A and shift handover reports.
 
-Privacy boundary: Claude only ever receives *structured signal metadata*
+Runs on any OpenAI-compatible LLM (Groq by default; xAI Grok, OpenRouter,
+Gemini or a fully local Ollama via LLM_PROVIDER — see app/ai/llm.py).
+
+Privacy boundary: the model only ever receives *structured signal metadata*
 (scores, headcounts, density, audio class labels, keyword transcripts, zone
 SOPs). Video frames and raw audio never leave the edge machine.
 
-Every call degrades gracefully: with no API key, a refusal, or a network
-error, the co-pilot falls back to deterministic templates so the control
+Every call degrades gracefully: with no key, a network error or invalid
+output, the co-pilot falls back to deterministic templates so the control
 room never loses its briefing.
 """
 
@@ -14,60 +17,67 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from typing import Literal, Optional
 
-import anthropic
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
-from app.core.config import load_config
+from app.ai.llm import LLMClient, parse_json
 
 logger = logging.getLogger("spectra.ai.copilot")
-
-FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 SYSTEM_PROMPT = """You are SPECTRA's incident co-pilot, embedded in the control room of a large Indian venue \
 (stadiums, concerts, religious gatherings, railway concourses). Operators read your output under time pressure.
 
 You receive structured, privacy-preserving signal data from SPECTRA's on-device perception: YOLO headcounts \
 converted to people/m² and Fruin Level of Service (LoS D ≥1.54/m², E ≥3.57/m², F ≥5/m² = crush danger), \
-baseline-relative optical-flow surges, AST acoustic classes, Whisper distress keywords (English, Hindi, Tamil, \
-Telugu), and the gated fusion score. Fusion caps any single sensor; corroboration across sensors compounds risk.
+baseline-relative optical-flow surges, acoustic classes, distress keywords (English, Hindi, Tamil, Telugu), \
+and the gated fusion score. Fusion caps any single sensor; corroboration across sensors compounds risk.
 
 Rules:
 - SPECTRA is decision support, not a certified safety system. Be calibrated: say what the signals show, how \
 confident you are, and what could make it a false alarm. Never invent facts that are not in the data.
-- Ground recommended actions in the zone's standard operating procedures when they fit, adding others only \
-when the signals clearly call for them. Name the responsible role for each action.
-- Public-address announcements must be calm, short, and directional (tell people where to go). Never use words \
-like "stampede" or "panic" in a PA message.
-- Write plainly. No markdown in structured fields."""
+- Ground recommended actions in the zone's standard operating procedures when they fit; name the responsible role.
+- Public-address announcements must be calm, short and directional (tell people where to go). Never use the \
+words "stampede" or "panic" in a PA message.
+- Write plainly."""
+
+BRIEF_FORMAT = """Respond with ONLY a JSON object of this exact shape:
+{
+  "headline": "≤12 words: what is happening and where",
+  "summary": "2-3 sentences: what the sensors show and why risk is elevated",
+  "likely_situation": "most likely real-world interpretation, one sentence",
+  "false_alarm_check": "what could make this a false alarm and how to verify quickly",
+  "confidence": "low" | "medium" | "high",
+  "recommended_actions": [{"role": "who acts", "action": "one imperative sentence", "priority": "now" | "next" | "monitor"}],
+  "pa_announcement_en": "calm PA message in English, ≤35 words",
+  "pa_announcement_hi": "the same PA message in Hindi, Devanagari script"
+}
+Give 3-5 recommended_actions, most urgent first."""
 
 
 class Action(BaseModel):
-    role: str = Field(description="Who acts, e.g. 'Gate stewards', 'Control room', 'Medical team'")
-    action: str = Field(description="One imperative sentence")
-    priority: Literal["now", "next", "monitor"]
+    role: str
+    action: str
+    priority: Literal["now", "next", "monitor"] = "next"
 
 
 class IncidentBrief(BaseModel):
-    headline: str = Field(description="≤ 12 words, what is happening and where")
-    summary: str = Field(description="2–3 sentences explaining what the sensors show and why risk is elevated")
-    likely_situation: str = Field(description="Most likely real-world interpretation, one sentence")
-    false_alarm_check: str = Field(description="What could make this a false alarm and how to verify it quickly")
-    confidence: Literal["low", "medium", "high"]
-    recommended_actions: list[Action] = Field(description="3–5 actions, most urgent first")
-    pa_announcement_en: str = Field(description="Calm public-address message in English, ≤ 35 words")
-    pa_announcement_hi: str = Field(description="The same PA message in Hindi (Devanagari script)")
+    headline: str
+    summary: str
+    likely_situation: str = ""
+    false_alarm_check: str = ""
+    confidence: Literal["low", "medium", "high"] = "medium"
+    recommended_actions: list[Action] = Field(default_factory=list)
+    pa_announcement_en: str = ""
+    pa_announcement_hi: str = ""
 
 
 class Copilot:
     _instance: Optional["Copilot"] = None
 
     def __init__(self) -> None:
-        self._config = load_config()
-        self._client: anthropic.AsyncAnthropic | None = None
+        self.llm = LLMClient()
         self.last_error: str | None = None
         self.calls = 0
 
@@ -78,24 +88,27 @@ class Copilot:
         return cls._instance
 
     @property
-    def model(self) -> str:
-        return self._config.llm.model or "claude-opus-5-5"
+    def enabled(self) -> bool:
+        return self.llm.enabled
 
     @property
-    def enabled(self) -> bool:
-        return self._config.llm.provider == "anthropic" and bool(
-            self._config.llm.api_key or os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN")
-        )
+    def model(self) -> str:
+        return self.llm.model
 
     def status(self) -> dict:
-        return {"enabled": self.enabled, "model": self.model if self.enabled else "offline templates",
-                "last_error": self.last_error, "calls": self.calls}
+        return {
+            "enabled": self.enabled,
+            "provider": self.llm.provider,
+            "provider_label": self.llm.label,
+            "model": self.llm.model if self.enabled else "offline templates",
+            "key_env": self.llm.key_env,
+            "last_error": self.last_error,
+            "calls": self.calls,
+        }
 
-    def _get_client(self) -> anthropic.AsyncAnthropic:
-        if self._client is None:
-            key = self._config.llm.api_key or None
-            self._client = anthropic.AsyncAnthropic(api_key=key, timeout=60.0, max_retries=1)
-        return self._client
+    def _fail(self, exc: Exception) -> None:
+        self.last_error = f"{type(exc).__name__}: {exc}"[:300]
+        logger.warning("LLM call failed (%s): %s", self.llm.label, self.last_error)
 
     # ── Incident briefing ──────────────────────────────────────────────
 
@@ -115,7 +128,7 @@ class Copilot:
                      "standard_operating_procedures": zone.sop if zone else []},
             "incident": {"trigger_level": inc["trigger_level"], "peak_level": inc["peak_level"],
                          "peak_risk": inc["peak_risk"], "seconds_since_start": round(time.time() - inc["started_at"]),
-                         "simulated_scenario": inc.get("scenario")},
+                         "simulated_drill": inc.get("scenario")},
             "signals_at_peak": self._signal_view(inc["peak_snapshot"]),
             "risk_trend_last_60s": [round(p[1], 2) for p in inc["timeline"][-120:][::4]],
             "recent_events": [e["message"] for e in FusionEngine.instance().events(15)
@@ -125,22 +138,22 @@ class Copilot:
         brief, source = None, "template"
         if self.enabled:
             try:
-                brief = await self._claude_brief(context)
-                source = "claude"
+                brief = await self._llm_brief(context)
+                source = "llm"
             except Exception as exc:
-                self.last_error = f"{type(exc).__name__}: {exc}"[:300]
-                logger.warning("Claude briefing failed, using template: %s", self.last_error)
+                self._fail(exc)
         if brief is None:
             brief = self._template_brief(inc, zone)
 
         inc = store.get(incident_id)
         if inc is None:
             return
-        inc["brief"] = {**brief, "source": source, "model": self.model if source == "claude" else None,
+        inc["brief"] = {**brief, "source": source,
+                        "model": f"{self.llm.label} · {self.llm.model}" if source == "llm" else None,
                         "generated_at": time.time(), "for_level": inc["peak_level"]}
         inc["brief_status"] = "ready"
         store.add_log(incident_id, "briefed", "copilot",
-                      f"Briefing generated by {'Claude' if source == 'claude' else 'offline template'}")
+                      f"Briefing generated by {self.llm.label if source == 'llm' else 'offline template'}")
         FusionEngine.instance().log_event(inc["zone_id"], "brief_ready", "info",
                                           f"AI brief: {brief['headline']}", incident_id=incident_id)
 
@@ -166,24 +179,19 @@ class Copilot:
             "blind_spot": snap.get("blind_spot"),
         }
 
-    async def _claude_brief(self, context: dict) -> dict:
+    async def _llm_brief(self, context: dict) -> dict:
         self.calls += 1
-        resp = await self._get_client().beta.messages.parse(
-            model=self.model,
-            max_tokens=4000,
-            system=SYSTEM_PROMPT,
-            output_config={"effort": "low"},  # briefings must land in seconds
-            output_format=IncidentBrief,
-            betas=[FALLBACK_BETA],
-            fallbacks="default",
-            messages=[{"role": "user", "content":
-                       "Brief the control room on this incident. Signal data:\n"
-                       + json.dumps(context, ensure_ascii=False, indent=1)}],
-        )
-        if resp.stop_reason == "refusal" or resp.parsed_output is None:
-            raise RuntimeError(f"no structured output (stop_reason={resp.stop_reason})")
+        user = ("Brief the control room on this incident.\n\nSignal data:\n"
+                + json.dumps(context, ensure_ascii=False, indent=1) + "\n\n" + BRIEF_FORMAT)
+        text = await self.llm.chat(SYSTEM_PROMPT, user, json_mode=True, max_tokens=1400, temperature=0.2)
+        try:
+            brief = IncidentBrief.model_validate(parse_json(text))
+        except (ValidationError, ValueError) as exc:
+            raise RuntimeError(f"invalid briefing JSON: {exc}") from exc
+        if not brief.recommended_actions:
+            raise RuntimeError("briefing had no actions")
         self.last_error = None
-        return resp.parsed_output.model_dump()
+        return brief.model_dump()
 
     @staticmethod
     def _template_brief(inc: dict, zone) -> dict:
@@ -226,33 +234,25 @@ class Copilot:
         }
         if not self.enabled:
             hottest = max(zones, key=lambda z: z["fused_risk"] or 0, default=None)
-            answer = ("Claude is offline (no ANTHROPIC_API_KEY), so here is the raw picture. "
-                      + (f"Highest risk: {hottest['zone']} at {hottest['fused_risk']:.2f} "
+            answer = (f"AI co-pilot is offline (set {self.llm.key_env or 'LLM_API_KEY'}). Raw picture: "
+                      + (f"highest risk is {hottest['zone']} at {round((hottest['fused_risk'] or 0) * 100)} "
                          f"({hottest['alert_level']}). " + "; ".join(hottest["sensor_reasons"] or [])
-                         if hottest else "No zones."))
+                         if hottest else "no zones configured."))
             return {"answer": answer, "source": "template"}
         try:
             self.calls += 1
-            resp = await self._get_client().beta.messages.create(
-                model=self.model,
-                max_tokens=2000,
-                system=SYSTEM_PROMPT + "\n\nNow answer an operator's question about the live situation in "
-                       "≤ 120 words. Lead with the answer. Plain sentences or a short dash list; no headings.",
-                output_config={"effort": "low"},
-                betas=[FALLBACK_BETA],
-                fallbacks="default",
-                messages=[{"role": "user", "content":
-                           f"Live state:\n{json.dumps(context, ensure_ascii=False, default=str)}\n\n"
-                           f"Operator question: {question}"}],
+            text = await self.llm.chat(
+                SYSTEM_PROMPT + "\n\nAnswer the operator's question about the live situation in ≤120 words. "
+                "Lead with the answer. Plain sentences or a short dash list; no headings, no markdown tables.",
+                f"Live state:\n{json.dumps(context, ensure_ascii=False, default=str)}\n\nOperator question: {question}",
+                max_tokens=500,
             )
-            text = "".join(b.text for b in resp.content if b.type == "text").strip()
-            if resp.stop_reason == "refusal" or not text:
-                raise RuntimeError(f"empty answer (stop_reason={resp.stop_reason})")
+            if not text:
+                raise RuntimeError("empty answer")
             self.last_error = None
-            return {"answer": text, "source": "claude", "model": self.model}
+            return {"answer": text, "source": "llm", "model": f"{self.llm.label} · {self.llm.model}"}
         except Exception as exc:
-            self.last_error = f"{type(exc).__name__}: {exc}"[:300]
-            logger.warning("Claude ask failed: %s", self.last_error)
+            self._fail(exc)
             return {"answer": f"Co-pilot unavailable ({type(exc).__name__}). Check the zone cards directly.",
                     "source": "error"}
 
@@ -268,7 +268,7 @@ class Copilot:
                 "start": time.strftime("%H:%M:%S", time.localtime(inc["started_at"])),
                 "duration_s": round((inc["ended_at"] or time.time()) - inc["started_at"]),
                 "peak_level": inc["peak_level"], "peak_risk": inc["peak_risk"],
-                "status": inc["status"], "simulated": bool(inc.get("scenario")),
+                "status": inc["status"], "drill": bool(inc.get("scenario")),
                 "headline": brief.get("headline"),
                 "reasons": (inc.get("peak_snapshot") or {}).get("reasons"),
                 "operator_log": [f"{l['action']}: {l['note']}" for l in inc["log"] if l["by"] == "operator"],
@@ -277,26 +277,20 @@ class Copilot:
             return {"report": "No incidents recorded this shift.", "source": "template"}
         if not self.enabled:
             lines = [f"- {i['start']} {i['zone']}: {i['peak_level'].upper()} (risk {i['peak_risk']}), "
-                     f"{i['duration_s']}s, status {i['status']}" for i in incidents]
+                     f"{i['duration_s']}s, status {i['status']}{' (drill)' if i['drill'] else ''}" for i in incidents]
             return {"report": "Shift handover (offline template)\n\n" + "\n".join(lines), "source": "template"}
         try:
             self.calls += 1
-            resp = await self._get_client().beta.messages.create(
-                model=self.model,
-                max_tokens=6000,
-                system=SYSTEM_PROMPT + "\n\nWrite a shift handover report in Markdown for the incoming "
-                       "control-room lead: overview (2 sentences), incidents table (time, zone, peak, status), "
-                       "open items needing follow-up, patterns worth watching next shift, and sensor/coverage "
-                       "issues. Mark simulated drills as drills. Keep it under 350 words.",
-                output_config={"effort": "medium"},
-                betas=[FALLBACK_BETA],
-                fallbacks="default",
-                messages=[{"role": "user", "content": json.dumps({"incidents": incidents}, ensure_ascii=False)}],
+            text = await self.llm.chat(
+                SYSTEM_PROMPT + "\n\nWrite a shift handover report in Markdown for the incoming control-room lead: "
+                "overview (2 sentences), incidents table (time, zone, peak, status), open items needing follow-up, "
+                "patterns to watch next shift, and sensor/coverage issues. Mark drills as drills. Under 350 words.",
+                json.dumps({"incidents": incidents}, ensure_ascii=False),
+                max_tokens=1200,
             )
-            text = "".join(b.text for b in resp.content if b.type == "text").strip()
-            if resp.stop_reason == "refusal" or not text:
-                raise RuntimeError(f"empty report (stop_reason={resp.stop_reason})")
-            return {"report": text, "source": "claude", "model": self.model}
+            if not text:
+                raise RuntimeError("empty report")
+            return {"report": text, "source": "llm", "model": f"{self.llm.label} · {self.llm.model}"}
         except Exception as exc:
-            self.last_error = f"{type(exc).__name__}: {exc}"[:300]
+            self._fail(exc)
             return {"report": f"Co-pilot unavailable ({type(exc).__name__}).", "source": "error"}

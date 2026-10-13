@@ -112,9 +112,10 @@ class EvidenceConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    provider: str = "anthropic"  # "anthropic" | "" (template only)
-    model: str = "claude-opus-5-5"
-    api_key: str = ""  # falls back to ANTHROPIC_API_KEY / SDK credential chain
+    provider: str = "groq"  # groq | xai | openrouter | gemini | ollama  (see app/ai/llm.py)
+    model: str = ""         # empty → provider default
+    api_key: str = ""       # empty → provider env var, e.g. GROQ_API_KEY
+    base_url: str = ""      # empty → provider default (set for any other OpenAI-compatible server)
 
 
 class AppConfig(BaseModel):
@@ -202,6 +203,8 @@ def load_config() -> AppConfig:
         data.setdefault("llm", {})["model"] = os.getenv("LLM_MODEL", "")
     if os.getenv("LLM_API_KEY"):
         data.setdefault("llm", {})["api_key"] = os.getenv("LLM_API_KEY", "")
+    if os.getenv("LLM_BASE_URL"):
+        data.setdefault("llm", {})["base_url"] = os.getenv("LLM_BASE_URL", "")
 
     # Apply SPECTRA_* env overrides
     data = _apply_env_overrides(data)

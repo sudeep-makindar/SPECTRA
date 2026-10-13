@@ -1,36 +1,34 @@
 /**
- * CopilotPanel — Claude incident co-pilot: latest briefing + "Ask SPECTRA".
+ * CopilotPanel — AI co-pilot: latest incident briefing + "Ask SPECTRA".
  */
 
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { Send, Sparkles } from 'lucide-react';
 import { useSpectra } from '../context/SpectraContext';
 import { api, fmtAgo } from '../lib/types';
 import type { Incident } from '../lib/types';
 
 const SUGGESTIONS = [
   'Which zone needs attention first, and why?',
-  'Is the Stage Front alarm likely a false alarm?',
-  'What should the gate stewards do right now?',
+  'Is the current alarm likely a false alarm?',
+  'What should the stewards do right now?',
 ];
 
 export function CopilotPanel() {
-  const { incidents } = useSpectra();
+  const { incidents, health } = useSpectra();
   const navigate = useNavigate();
   const [q, setQ] = useState('');
   const [answer, setAnswer] = useState<{ text: string; source: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [latest, setLatest] = useState<Incident | null>(null);
-  const [status, setStatus] = useState<{ enabled: boolean; model: string } | null>(null);
+  const cp = health?.copilot;
 
-  const latestSummary = incidents.find(i => i.brief_status === 'ready');
+  const latestSummary = incidents.find(i => i.brief_status === 'ready' && !i.ended_at) ?? incidents.find(i => i.brief_status === 'ready');
   useEffect(() => {
-    api<{ enabled: boolean; model: string }>('/api/copilot/status').then(setStatus).catch(() => {});
-  }, []);
-  useEffect(() => {
-    if (!latestSummary) return;
+    if (!latestSummary) { setLatest(null); return; }
     api<Incident>(`/api/incidents/${latestSummary.id}`).then(setLatest).catch(() => {});
-  }, [latestSummary?.id, latestSummary?.headline, latestSummary]);
+  }, [latestSummary?.id, latestSummary?.headline]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const ask = async (question: string) => {
     if (!question.trim()) return;
@@ -48,56 +46,58 @@ export function CopilotPanel() {
 
   const brief = latest?.brief;
   return (
-    <div className="card card-dark ai-glow" style={{ display: 'flex', flexDirection: 'column', gap: 14, height: '100%' }}>
-      <div className="section-title" style={{ marginBottom: 0 }}>
-        <div className="card-label" style={{ marginBottom: 0 }}>AI Co-pilot</div>
-        <span className="chip chip-ai">✦ {status?.enabled ? status.model : 'offline templates'}</span>
+    <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 14, height: '100%' }}>
+      <div className="card-head" style={{ marginBottom: 0 }}>
+        <div className="card-title"><Sparkles size={15} color="var(--color-accent)" /> AI Co-pilot</div>
+        <span className={`tag ${cp?.enabled ? 'accent' : ''}`} title={cp?.last_error ?? ''}>
+          {cp?.enabled ? `${cp.provider_label} · ${cp.model}` : `Offline templates${cp?.key_env ? ` · set ${cp.key_env}` : ''}`}
+        </span>
       </div>
 
       {brief && latest ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, cursor: 'pointer' }} onClick={() => navigate(`/incidents?id=${latest.id}`)}>
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-            <span className={`level-pill level-${latest.peak_level}`}>{latest.peak_level}</span>
-            <span className="dim" style={{ fontSize: '0.7rem' }}>{latest.zone_name} · {fmtAgo(latest.started_at)} · {brief.confidence} confidence</span>
+        <div className="card inset clickable" style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 8 }} onClick={() => navigate(`/incidents?id=${latest.id}`)}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            {latest.ended_at
+              ? <span className="tag">Last briefing · closed</span>
+              : <span className={`level-pill level-${latest.peak_level}`}>{latest.peak_level} · active</span>}
+            <span className="dim" style={{ fontSize: '0.72rem' }}>{latest.zone_name} · {fmtAgo(latest.started_at)} · {brief.confidence} confidence</span>
           </div>
-          <div style={{ fontWeight: 700, fontSize: '1rem', lineHeight: 1.3 }}>{brief.headline}</div>
+          <div style={{ fontWeight: 600, fontSize: '0.92rem', lineHeight: 1.35 }}>{brief.headline}</div>
           <div className="muted" style={{ fontSize: '0.8rem', lineHeight: 1.5 }}>{brief.summary}</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 2 }}>
             {brief.recommended_actions.slice(0, 3).map((a, i) => (
-              <div key={i} style={{ fontSize: '0.76rem', display: 'flex', gap: 8 }}>
-                <span className="kbd" style={{ color: a.priority === 'now' ? 'var(--color-risk-high)' : undefined }}>{a.priority}</span>
-                <span><b>{a.role}:</b> {a.action}</span>
+              <div key={i} style={{ fontSize: '0.78rem', display: 'flex', gap: 8, lineHeight: 1.4 }}>
+                <span className="kbd" style={{ color: a.priority === 'now' ? 'var(--color-risk-high)' : undefined, flexShrink: 0 }}>{a.priority}</span>
+                <span><b style={{ fontWeight: 600 }}>{a.role}:</b> <span className="muted">{a.action}</span></span>
               </div>
             ))}
           </div>
-          <div style={{ fontSize: '0.78rem', padding: '8px 10px', borderRadius: 12, background: 'var(--color-surface)' }}>
-            <div className="card-label">PA announcement · हिंदी</div>
-            {brief.pa_announcement_hi}
-          </div>
+          <span style={{ fontSize: '0.74rem', color: 'var(--color-accent)' }}>Open incident →</span>
         </div>
       ) : (
-        <div className="dim" style={{ fontSize: '0.8rem' }}>
-          When a zone reaches HIGH, SPECTRA writes a briefing: what the sensors show, how confident it is, what to do, and a bilingual PA announcement. Only signal metadata is shared; video and audio stay on this machine.
+        <div className="muted" style={{ fontSize: '0.8rem', lineHeight: 1.55 }}>
+          When a zone reaches HIGH, the co-pilot writes a briefing: what the sensors show, how confident it is, what to do, and a bilingual PA announcement. It receives signal metadata only; video and audio never leave this machine.
         </div>
       )}
 
-      <div className="hr" />
-      <form style={{ display: 'flex', gap: 8 }} onSubmit={e => { e.preventDefault(); ask(q); }}>
-        <input className="text-input" value={q} onChange={e => setQ(e.target.value)} placeholder="Ask SPECTRA about the live situation…" />
-        <button className="btn btn-primary" disabled={busy || !q.trim()}>{busy ? '…' : 'Ask'}</button>
-      </form>
-      {!answer && !busy && (
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          {SUGGESTIONS.map(s => <button key={s} className="chip" onClick={() => { setQ(s); ask(s); }}>{s}</button>)}
-        </div>
-      )}
-      {busy && <div className="skeleton" style={{ height: 48 }} />}
-      {answer && (
-        <div className="copilot-answer" style={{ padding: 12, borderRadius: 14, background: 'var(--color-surface)' }}>
-          {answer.text}
-          <div className="dim" style={{ fontSize: '0.65rem', marginTop: 6 }}>{answer.source === 'claude' ? 'Claude · signal metadata only' : answer.source}</div>
-        </div>
-      )}
+      <div style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {answer && (
+          <div className="pa-box copilot-answer">
+            {answer.text}
+            <div className="dim" style={{ fontSize: '0.66rem', marginTop: 6 }}>{answer.source === 'llm' ? `${cp?.provider_label} · metadata only` : answer.source}</div>
+          </div>
+        )}
+        {busy && <div className="skeleton" style={{ height: 44 }} />}
+        {!answer && !busy && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {SUGGESTIONS.map(s => <button key={s} className="suggestion" onClick={() => { setQ(s); ask(s); }}>{s}</button>)}
+          </div>
+        )}
+        <form style={{ display: 'flex', gap: 8 }} onSubmit={e => { e.preventDefault(); ask(q); }}>
+          <input className="text-input" value={q} onChange={e => setQ(e.target.value)} placeholder="Ask about the live situation…" />
+          <button className="btn btn-primary" disabled={busy || !q.trim()} aria-label="Ask"><Send /></button>
+        </form>
+      </div>
     </div>
   );
 }
