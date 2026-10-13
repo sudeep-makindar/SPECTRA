@@ -40,3 +40,6 @@ venv/
 *.wav
 *.webm
 !docs/screenshots/**
+
+# Local HTTPS certs for phone nodes
+config/certs/

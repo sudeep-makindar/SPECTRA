@@ -1,3 +1,26 @@
+# ⚡ Status update — Phase 5 complete (supersedes sections 4 and 6 below where they conflict)
+
+Sections 4–6 below were written before Phase 5 and overstated what worked
+(the live pipeline crashed in `record_latency`, ByteTrack's `lap` dep was missing,
+zones/incidents pages were stubs). As of Phase 5:
+
+- **Fusion**: `backend/app/fusion/core.py` is the pure, tested gated-fusion logic
+  (caps, debounced corroboration, hysteresis, forecast), shared by the engine and
+  the eval harness. `tests/test_fusion.py` pins its safety properties.
+- **Zones** (`app/zones/manager.py`, persisted to `data/zones.json`) carry floor area → people/m² → Fruin LoS.
+- **Incidents** (`app/incidents/store.py`, JSON per incident in `data/incidents/`), evidence clips with head anonymisation.
+- **Claude co-pilot** (`app/ai/copilot.py`, `claude-opus-5-5`, metadata only, template fallback). Key in `.env` as `ANTHROPIC_API_KEY`.
+- **Scenario director** (`app/scenarios/director.py`), **eval harness** (`app/evaluation/harness.py`, CLI `python -m tests.eval_harness`).
+- **Frontend**: single `SpectraProvider` WebSocket (`src/context/SpectraContext.tsx`), shared types in `src/lib/types.ts`.
+  Series colours were validated for CVD/contrast; risk tiers use the reserved status palette.
+- **Phones**: `scripts/make_https.sh` → Vite serves HTTPS on the LAN; pair via QR in "Connect device".
+- Demo script: `docs/DEMO.md`.
+
+Next candidates: per-zone threshold overrides from the UI, session recording + deterministic replay,
+fine-tuned audio adapter (Phase 7), ONVIF discovery.
+
+---
+
 # SPECTRA — Comprehensive Agent Handoff & Knowledge Base
 
 > **CONFIDENTIAL & INTERNAL DEVELOPER REFERENCE**  

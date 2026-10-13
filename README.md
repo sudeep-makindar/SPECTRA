@@ -1,113 +1,97 @@
-# Spectra
+# SPECTRA
 
-**A multimodal crowd-safety intelligence platform.**
+**Multimodal crowd-safety intelligence that tells a control room where to look and why, before a crowd becomes a crush.**
 
-Spectra ingests video and audio from heterogeneous sources (CCTV cameras, microphones, phone-based nodes), runs AI perception on each stream, groups sources into spatial zones, and fuses vision + motion + audio signals into a live, explainable risk score per zone. When risk crosses a threshold, it raises an alert with an evidence clip, timeline, and narrative summary.
+SPECTRA watches CCTV, microphones and ordinary phones at the same time. It turns what it sees and hears into a live, explainable risk score for every zone of a venue. When the risk is real, it raises one alert with an evidence clip, a plain-language AI briefing, and a bilingual PA announcement. When it isn't, it stays quiet.
 
-> **Important:** Spectra is a decision-support prototype that helps control-room operators decide where to look. It is not a certified life-safety system. Pretrained models produce false positives; the project measures and reports them honestly.
+> SPECTRA is a decision-support prototype for human operators, not a certified life-safety system. It measures and reports its own false-alarm rate.
 
-## The Problem
+## Why
 
-Crowd-safety monitoring today is either purely human (operators watching too many screens) or single-modal (a camera analytics vendor that ignores audio). Both miss events. A scream on a microphone means nothing without visual context; a dense crowd looks alarming but might just be a queue. Spectra's thesis is that **cross-modal confirmation** — requiring two or more modalities to agree before raising risk — dramatically reduces false positives while catching real incidents faster.
+India's recent crowd disasters (Hathras 2024; Tirupati, the Kumbh and Bengaluru in 2025) all happened in places full of cameras. The missing piece was a system that could watch every feed at once, recognise rising density and distress early, and get an operator's attention without crying wolf.
 
-## Why It's Hard
+Single-sensor products fail in opposite directions. Audio detectors page security for every song and firecracker. Vision detectors can't tell a happy dense crowd from a dangerous one. SPECTRA's core idea is **gated cross-modal fusion**: no single sensor can raise a CRITICAL alarm on its own, and independent sensors that agree compound into one.
 
-- **Heterogeneous sources** with different latencies, frame rates, and failure modes
-- **Real-time fusion** across modalities that don't share a clock or coordinate system
-- **Baseline-relative anomaly detection** (a camera's "normal" depends on angle, distance, and time of day)
-- **Explainability** — an operator needs to know *why* the system is alarmed, not just *that* it is
-- **Running on consumer hardware** (Apple Silicon laptop, no cloud GPU)
+## What it does
+
+| | |
+|---|---|
+| **See** | YOLO person detection + per-camera ByteTrack → headcount → **people/m² and Fruin Level of Service** (A–F), crowd heading, heading chaos, people-down heuristic, occupancy heatmap |
+| **Feel motion** | Farneback optical flow against each camera's *own* learned baseline (calibration window; spikes can't become the new normal) |
+| **Hear** | Audio Spectrogram Transformer (AudioSet) threat groups: screams, gunshots, glass, alarms. **Whisper** distress keywords in English, Hindi, Tamil and Telugu ("help", "bachao", "madad", "காப்பாத்துங்க"…). Fireworks, crackers and drums suppress the gunshot trigger |
+| **Fuse** | Per-zone gated fusion: per-sensor caps, debounced corroboration, hysteresis, a trend forecast ("CRITICAL in ~40 s"), and a ranked human-readable *why* |
+| **Act** | Incidents with H.264 evidence clips (8 s before / 6 s after, heads anonymised), operator workflow (hotkeys **A**cknowledge / **E**scalate / **M**ute), audit log, printable report |
+| **Brief** | **Claude co-pilot**: incident briefings with confidence, false-alarm check, SOP-grounded action checklist, PA announcements in **English and Hindi**, "Ask SPECTRA" Q&A, shift handover reports. It receives **signal metadata only**, never video or audio |
+| **Connect** | Mac camera and mic in one click; phones join by **QR code** and also act as steward pagers (red screen and vibration when their zone alarms); RTSP/IP cameras; recorded video |
+| **Prove** | Live p50/p95/p99 latency per stage, and an evaluation harness comparing SPECTRA with single-sensor detectors |
+
+## Results
+
+The evaluation harness (`make eval`) replays 9 scenarios × 40 randomized trials through the production fusion code:
+
+| Detector (stress suite*) | Detection rate | False-alarm rate |
+|---|---|---|
+| Audio-only | 75% | 40% |
+| Vision-only | 75% | 27% |
+| Motion-only | 75% | 20% |
+| Any-sensor OR | 100% | 80% |
+| **SPECTRA gated fusion** | **100%** | **13%** |
+
+\*Stress suite: 2× sensor noise, 15% random sensor dropout, held-out seed. Thresholds were tuned on the standard suite. Traces model sensor *evidence*, not raw footage. See the System page for the method, confusion matrix and limitations.
+
+Measured on an Apple Silicon laptop (MPS): YOLO + ByteTrack ≈ 30 ms p50, optical flow ≈ 10 ms, capture → fused risk ≈ 35 ms p95, AST ≈ 250 ms per 2 s audio window, Whisper ≈ 300–500 ms only when speech is present.
 
 ## Architecture
 
 ```
-Sources (RTSP/webcam/phone/file) → Ingestion Gateway → [Vision Worker | Audio Worker]
-    → Fusion Engine (per zone) → Alerts + Evidence → Dashboard (React)
+Sources ── Mac cam/mic · phones (QR, WSS) · RTSP · video files
+   │        latest-frame-wins queues, one inference in flight per camera
+   ▼
+Perception (on-device, asyncio.to_thread — no MPS fork locks)
+   YOLO+ByteTrack ─ optical flow ─ AST ─ Whisper (speech-gated)
+   ▼
+FusionCore per zone (pure, shared with the eval harness)
+   caps → debounced corroboration → noisy-OR ×1.2 → smoothing → hysteresis → forecast
+   ▼
+Incidents ── evidence clips · audit log ── Claude co-pilot (metadata only)
+   ▼
+React dashboard (WebSocket 2 Hz) · phone pager · PDF report
 ```
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full diagram and design decisions.
+Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · demo script: [docs/DEMO.md](docs/DEMO.md)
 
-## Key Technical Decisions
-
-| Decision | Why |
-|----------|-----|
-| **Zones as the core abstraction** | A microphone covers an area, not a camera's FOV. Fusion runs per zone. |
-| **Cross-modal confirmation** | ≥2 modalities agreeing applies a multiplier; 1 modality alone gets dampened. This is the false-positive reducer. |
-| **Hysteresis state machine** | Different up/down thresholds prevent alert flapping (NORMAL→HIGH requires 0.55, HIGH→NORMAL requires 0.40). |
-| **Baseline-relative motion** | Optical flow is compared to a 60-second rolling baseline per camera, not absolute values. |
-| **MPS with CPU fallback** | Runs on Apple Silicon; `PYTORCH_ENABLE_MPS_FALLBACK=1` silently falls back for unsupported ops. |
-| **Everything tunable in YAML** | Fusion weights, thresholds, audio label groups — no magic numbers in code. |
-
-## Tech Stack
-
-- **Backend:** Python 3.11+, FastAPI, asyncio, multiprocessing for inference workers
-- **Vision:** Ultralytics YOLO (small variant, AGPL-3.0 — see [License Notes](#license-notes))
-- **Motion:** OpenCV Farneback optical flow on downscaled frames
-- **Audio:** HuggingFace `MIT/ast-finetuned-audioset-10-10-0.4593` (Audio Spectrogram Transformer)
-- **Database:** SQLite via SQLModel
-- **Frontend:** React + TypeScript, Vite, Tailwind CSS, Recharts
-- **Real-time:** WebSocket for live state, REST for CRUD and history
-
-## Quick Start
+## Quick start
 
 ```bash
-# Clone and setup
-git clone <repo-url> && cd spectra
-make setup
+make setup                      # Python deps (uv/pip) + npm install
+cp .env.example .env            # optional: add ANTHROPIC_API_KEY for the Claude co-pilot
+./scripts/make_https.sh         # self-signed cert so phones can stream camera/mic
 
-# Start dev servers (backend on :8000, frontend on :5173)
-make dev
-
-# Run tests
-make test
-
-# Launch demo with simulated sources
-make demo
+make dev-backend                # :8000 (models load in the background)
+make dev-frontend               # https://localhost:5173
 ```
 
-### Prerequisites
+Then **Connect device** → add the Mac camera, pair phones by QR, and use the **Scenario Director** to run scripted, clearly labelled simulations (gate surge, panic + "bachao", concert false-alarm test, gunshot, sensor blackout).
 
-- Python 3.11+ with `uv` or `pip`
-- Node.js 18+
-- macOS with Apple Silicon recommended (works on any platform with CPU)
-
-## Project Structure
-
-```
-backend/       — FastAPI server, AI workers, fusion engine
-frontend/      — React dashboard
-scripts/       — benchmarks, evaluation, utilities
-training/      — fine-tuning stubs (Phase 7)
-docs/          — architecture, decisions, benchmarks
-config/        — YAML configuration files
-data/          — gitignored runtime data (incidents, DB)
+```bash
+make test                       # unit tests incl. fusion safety properties
+make eval                       # benchmark → data/eval/report.{json,md}
 ```
 
-## Limitations (Honest Assessment)
+## Privacy & ethics
 
-- **Pretrained models** are not fine-tuned for crowd-safety; expect false positives from the audio classifier in noisy environments
-- **Single-machine** architecture; no horizontal scaling
-- **No ONVIF auto-discovery**; camera URLs must be configured manually
-- **Privacy**: face blur is a flag, not production-grade; no anonymization pipeline
-- **Audio capture** via browser requires HTTPS on non-localhost (see [docs/REMOTE_NODES.md](docs/REMOTE_NODES.md))
+- All perception runs on the edge machine. Raw video and audio never leave it.
+- Claude receives structured numbers and short keyword transcripts only, and briefings fall back to offline templates with no network.
+- Stored clips have every detected person's head region pixelated (aligned with the DPDP Act's data-minimisation principle). Retention is configurable.
+- Simulated signals are flagged `SIM` everywhere they appear. The UI always shows "Decision-support prototype · Not a certified safety system".
 
-## What I'd Do Next
+## Limitations
 
-1. Fine-tune the AST audio model on a public scream/gunshot dataset (training stubs are in place)
-2. Add a lightweight panic classifier on optical flow features
-3. Session recorder with deterministic replay and "what-if" threshold slider
-4. Shift handover summary and incident report export
+- Pretrained models are not fine-tuned on crowd-disaster data; the fusion benchmark uses synthetic sensor-evidence traces.
+- Headcount → density assumes non-overlapping cameras and a configured floor area per zone.
+- The fallen-person heuristic is aspect-ratio based and noisy.
+- Single-machine deployment.
 
-## Ethics & Privacy
+## License notes
 
-- Raw video/audio never leaves the server. Only evidence JSON text is sent to the LLM summarizer (if configured).
-- Face blur toggle is available (behind a config flag).
-- Incident clips are auto-deleted after a configurable retention period (default: 30 days).
-- The system always displays "Decision-support prototype. Not a certified safety system."
-- Simulated sources are clearly labeled `SIM` in the UI.
-
-## License Notes
-
-This project uses Ultralytics YOLO, which is licensed under AGPL-3.0. If you deploy Spectra, you must comply with AGPL-3.0 terms (open-source your deployment) or obtain a commercial Ultralytics license.
-
-The Audio Spectrogram Transformer (AST) model is from MIT and is BSD-licensed.
+Ultralytics YOLO is AGPL-3.0. Deployments must comply or obtain a commercial licence. The AST model is BSD-licensed; Whisper is MIT.

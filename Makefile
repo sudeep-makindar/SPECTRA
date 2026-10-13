@@ -10,7 +10,7 @@
 #   make lint     — Lint backend code
 #   make clean    — Remove build artifacts and cached data
 
-.PHONY: setup setup-backend setup-frontend dev dev-backend dev-frontend test lint bench demo clean https
+.PHONY: setup setup-backend setup-frontend dev dev-backend dev-frontend test lint bench eval demo clean https
 
 # ── Setup ──────────────────────────────────────────────────────────────
 
@@ -35,8 +35,10 @@ dev:
 	$(MAKE) dev-frontend &
 	wait
 
+PY := $(shell [ -x backend/.venv/bin/python ] && echo .venv/bin/python || echo python)
+
 dev-backend:
-	cd backend && python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+	cd backend && $(PY) -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 dev-frontend:
 	cd frontend && npm run dev
@@ -44,7 +46,7 @@ dev-frontend:
 # ── Testing ────────────────────────────────────────────────────────────
 
 test:
-	cd backend && python -m pytest tests/ -v --tb=short
+	cd backend && $(PY) -m pytest tests/ -v --tb=short
 
 lint:
 	cd backend && python -m ruff check . --fix
@@ -52,8 +54,10 @@ lint:
 
 # ── Benchmarks & Evaluation ───────────────────────────────────────────
 
-bench:
-	cd backend && python -m scripts.bench
+bench: eval
+
+eval:
+	cd backend && $(PY) -m tests.eval_harness --perception
 
 # ── Demo ───────────────────────────────────────────────────────────────
 
@@ -67,8 +71,7 @@ demo:
 # ── HTTPS for remote nodes ─────────────────────────────────────────────
 
 https:
-	@echo "See docs/REMOTE_NODES.md for HTTPS setup options"
-	@bash scripts/make_https.sh 2>/dev/null || echo "Run: mkcert -install && mkcert localhost 127.0.0.1 ::1"
+	@bash scripts/make_https.sh --force
 
 # ── Cleanup ────────────────────────────────────────────────────────────
 
