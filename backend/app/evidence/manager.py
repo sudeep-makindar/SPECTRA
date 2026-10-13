@@ -1,14 +1,25 @@
 """
-Evidence Manager — Maintains rolling video buffers and records incidents.
+Evidence Manager — rolling video buffers and incident clips.
+
+Every video source keeps a ring buffer of recent frames. When an incident
+opens, we wait `post_event_s`, then cut a clip spanning `pre_event_s` before
+to `post_event_s` after the trigger for every camera in the incident's zone.
+
+Clips are H.264 (avc1) so they play in any browser, get a thumbnail, and —
+when `evidence.face_blur` is on — have faces blurred before they touch disk
+(privacy by design; aligns with India's DPDP Act data-minimisation principle).
+Anonymisation reuses the YOLO person boxes: the head region (top ~22% of each
+box) of every tracked person is blurred, so no separate face model is needed
+and people facing away are covered too.
 """
 
 from __future__ import annotations
 
 import asyncio
 import collections
+import datetime
 import logging
 import time
-from pathlib import Path
 
 import cv2
 import numpy as np
@@ -18,6 +29,9 @@ from app.ingest.base import SourcePacket
 
 logger = logging.getLogger("spectra.evidence")
 
+MAX_STORE_WIDTH = 960
+
+
 class EvidenceManager:
     _instance = None
 
@@ -26,10 +40,11 @@ class EvidenceManager:
         self._buffers: dict[str, collections.deque] = {}
         self._buffer_duration = self._config.evidence.ring_buffer_s
         self._is_running = False
-        
-        # A queue of (zone_id, source_id, timestamp) for incidents to record
         self._record_queue: asyncio.Queue = asyncio.Queue()
         self._task: asyncio.Task | None = None
+        self._blur = bool(self._config.evidence.face_blur)
+        # Recent person boxes per source: (ts, frame_width, [[x1,y1,x2,y2], ...])
+        self._detections: dict[str, collections.deque] = {}
 
     @classmethod
     def instance(cls) -> "EvidenceManager":
@@ -42,7 +57,8 @@ class EvidenceManager:
             return
         self._is_running = True
         self._task = asyncio.create_task(self._process_records())
-        logger.info("Evidence Manager started (Ring buffer: %ds)", self._buffer_duration)
+        logger.info("Evidence Manager started (ring buffer %.0fs, face blur %s)",
+                    self._buffer_duration, "on" if self._blur else "off")
 
     async def stop(self) -> None:
         self._is_running = False
@@ -54,86 +70,125 @@ class EvidenceManager:
                 pass
 
     def add_frame(self, packet: SourcePacket) -> None:
-        """Add a frame to the rolling buffer for its source."""
-        if packet.payload is None or not isinstance(packet.payload, np.ndarray):
+        if packet.payload is None or not isinstance(packet.payload, np.ndarray) or packet.payload.ndim != 3:
             return
-            
-        source_id = packet.source_id
-        if source_id not in self._buffers:
-            self._buffers[source_id] = collections.deque()
-            
-        dq = self._buffers[source_id]
-        
-        # Store timestamp and the BGR frame
-        dq.append((packet.ts_capture, packet.payload))
-        
-        # Evict old frames
+        frame = packet.payload
+        if frame.shape[1] > MAX_STORE_WIDTH:
+            s = MAX_STORE_WIDTH / frame.shape[1]
+            frame = cv2.resize(frame, (MAX_STORE_WIDTH, int(frame.shape[0] * s)), interpolation=cv2.INTER_AREA)
+        dq = self._buffers.setdefault(packet.source_id, collections.deque())
+        dq.append((packet.ts_capture, frame))
         cutoff = packet.ts_capture - self._buffer_duration
-        while len(dq) > 0 and dq[0][0] < cutoff:
+        while dq and dq[0][0] < cutoff:
             dq.popleft()
 
-    def trigger_incident(self, zone_id: str) -> None:
-        """Signal that an incident occurred in a zone."""
-        # For prototype, we just grab all currently active sources in the buffer
-        # In a real system, we'd map zone_id to specific source_ids
-        for source_id in self._buffers.keys():
-            self._record_queue.put_nowait((zone_id, source_id, time.time()))
+    def add_detections(self, source_id: str, ts: float, frame_width: int, boxes: list) -> None:
+        dq = self._detections.setdefault(source_id, collections.deque(maxlen=200))
+        dq.append((ts, frame_width, boxes))
+        while dq and dq[0][0] < ts - self._buffer_duration - 2:
+            dq.popleft()
+
+    def _boxes_at(self, source_id: str, ts: float) -> tuple[int, list] | None:
+        best = None
+        for t, w, boxes in self._detections.get(source_id, ()):
+            if abs(t - ts) <= 1.0 and (best is None or abs(t - ts) < abs(best[0] - ts)):
+                best = (t, w, boxes)
+        return (best[1], best[2]) if best else None
+
+    def trigger_incident(self, zone_id: str, incident_id: str) -> None:
+        from app.fusion.engine import FusionEngine
+        zone = FusionEngine.instance().get_zone(zone_id)
+        source_ids = [s for s in (zone.source_ids if zone else []) if s in self._buffers]
+        if not source_ids:
+            logger.info("Incident %s: no camera buffers in zone %s — no clip", incident_id, zone_id)
+            return
+        self._record_queue.put_nowait((incident_id, zone_id, source_ids, time.time()))
 
     async def _process_records(self) -> None:
+        cfg = self._config.evidence
         while self._is_running:
             try:
-                zone_id, source_id, trigger_ts = await self._record_queue.get()
-                
-                # Copy the current buffer safely
-                if source_id not in self._buffers:
-                    self._record_queue.task_done()
-                    continue
-                    
-                frames = list(self._buffers[source_id])
-                
-                # Offload encoding to a thread so we don't block the async loop
-                await asyncio.to_thread(self._write_video, zone_id, source_id, trigger_ts, frames)
-                
-                self._record_queue.task_done()
+                incident_id, zone_id, source_ids, trigger_ts = await self._record_queue.get()
+                wait = trigger_ts + cfg.post_event_s - time.time()
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                for sid in source_ids:
+                    frames = [(t, f) for t, f in list(self._buffers.get(sid, []))
+                              if trigger_ts - cfg.pre_event_s <= t <= trigger_ts + cfg.post_event_s]
+                    clip = await asyncio.to_thread(self._write_clip, zone_id, sid, trigger_ts, frames)
+                    if clip:
+                        self._attach(incident_id, clip)
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error("Error recording incident: %s", e)
+                logger.error("Error recording incident: %s", e, exc_info=True)
 
-    def _write_video(self, zone_id: str, source_id: str, ts: float, frames: list[tuple[float, np.ndarray]]) -> None:
-        if not frames:
-            return
-            
-        # Ensure directory exists
+    def _attach(self, incident_id: str, clip: dict) -> None:
+        from app.incidents.store import IncidentStore
+        store = IncidentStore.instance()
+        inc = store.get(incident_id)
+        if inc is not None:
+            inc["clips"].append(clip)
+            store.save(inc)
+
+    def _blur_faces(self, frame: np.ndarray, source_id: str, ts: float) -> np.ndarray:
+        if not self._blur:
+            return frame
+        found = self._boxes_at(source_id, ts)
+        if not found:
+            return frame
+        orig_w, boxes = found
+        s = frame.shape[1] / max(orig_w, 1)
+        H, W = frame.shape[:2]
+        for x1, y1, x2, y2 in boxes:
+            x1, y1, x2, y2 = int(x1 * s), int(y1 * s), int(x2 * s), int(y2 * s)
+            bw, bh = x2 - x1, y2 - y1
+            hx1, hx2 = max(0, x1 + int(bw * 0.15)), min(W, x2 - int(bw * 0.15))
+            hy1, hy2 = max(0, y1), min(H, y1 + max(int(bh * 0.22), int(bw * 0.5)))
+            if hx2 - hx1 > 2 and hy2 - hy1 > 2:
+                roi = frame[hy1:hy2, hx1:hx2]
+                small = cv2.resize(roi, (max(1, roi.shape[1] // 10), max(1, roi.shape[0] // 10)))
+                frame[hy1:hy2, hx1:hx2] = cv2.resize(small, (roi.shape[1], roi.shape[0]), interpolation=cv2.INTER_NEAREST)
+        return frame
+
+    def _write_clip(self, zone_id: str, source_id: str, ts: float, frames: list) -> dict | None:
+        if len(frames) < 2:
+            return None
         INCIDENTS_DIR.mkdir(parents=True, exist_ok=True)
-        
-        # Generate filename
-        # Format: zoneID_sourceID_YYYYMMDD_HHMMSS.mp4
-        import datetime
-        dt_str = datetime.datetime.fromtimestamp(ts).strftime("%Y%m%d_%H%M%S")
-        filename = f"{zone_id}_{source_id}_{dt_str}.mp4"
-        filepath = INCIDENTS_DIR / filename
-        
-        # Determine fps from timestamps or default to 5
-        if len(frames) > 1:
-            duration = frames[-1][0] - frames[0][0]
-            fps = len(frames) / duration if duration > 0 else 5.0
-        else:
-            fps = 5.0
-            
-        # Get frame dimensions
-        height, width = frames[0][1].shape[:2]
-        
-        logger.info("Writing incident video %s (%d frames, %.1f fps)", filename, len(frames), fps)
-        
-        # Use mp4v codec for standard mp4
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(str(filepath), fourcc, fps, (width, height))
-        
+        stamp = datetime.datetime.fromtimestamp(ts).strftime("%Y%m%d_%H%M%S")
+        base = f"{zone_id}_{source_id}_{stamp}"
+        path, thumb = INCIDENTS_DIR / f"{base}.mp4", INCIDENTS_DIR / f"{base}.jpg"
+
+        duration = frames[-1][0] - frames[0][0]
+        fps = max(1.0, min(30.0, (len(frames) - 1) / duration)) if duration > 0 else 5.0
+        h, w = frames[0][1].shape[:2]
+        out = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"avc1"), fps, (w, h))
+        if not out.isOpened():
+            out = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+
+        trigger_frame = None
         try:
-            for _, frame in frames:
-                out.write(frame)
+            for t, frame in frames:
+                f = self._blur_faces(frame.copy(), source_id, t) if frame.shape[:2] == (h, w) else None
+                if f is None:
+                    continue
+                if trigger_frame is None and t >= ts:
+                    trigger_frame = f
+                out.write(f)
         finally:
             out.release()
-            
-        logger.info("Incident video saved to %s", filepath)
+        cv2.imwrite(str(thumb), trigger_frame if trigger_frame is not None else self._blur_faces(frames[-1][1].copy(), source_id, frames[-1][0]),
+                    [cv2.IMWRITE_JPEG_QUALITY, 80])
+
+        logger.info("Incident clip saved: %s (%d frames, %.1f fps)", path.name, len(frames), fps)
+        return {
+            "source_id": source_id,
+            "file": path.name,
+            "thumb_file": thumb.name,
+            "url": f"/api/incidents/media/{path.name}",
+            "thumb": f"/api/incidents/media/{thumb.name}",
+            "frames": len(frames),
+            "duration_s": round(duration, 1),
+            "trigger_offset_s": round(ts - frames[0][0], 1),
+            "face_blur": self._blur,
+        }

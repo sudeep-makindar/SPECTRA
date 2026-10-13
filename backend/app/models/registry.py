@@ -72,10 +72,9 @@ class ModelRegistry:
         self._models[name] = model
         logger.info("Registered model: %s", name)
 
-    def get(self, name: str) -> BaseModel:
-        if name not in self._models:
-            raise KeyError(f"Model '{name}' not registered. Available: {list(self._models.keys())}")
-        return self._models[name]
+    def get(self, name: str) -> BaseModel | None:
+        """Return the model, or None while it is still loading (or failed to load)."""
+        return self._models.get(name)
 
     def all_info(self) -> dict[str, dict]:
         return {name: model.info().__dict__ for name, model in self._models.items()}

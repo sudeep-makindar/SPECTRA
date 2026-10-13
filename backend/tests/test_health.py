@@ -62,13 +62,15 @@ def test_sources_stub_returns_list(client):
     assert response.json() == []
 
 
-def test_zones_stub_returns_list(client):
+def test_zones_have_area_and_capacity(client):
     response = client.get("/api/zones")
     assert response.status_code == 200
-    assert response.json() == []
+    zones = response.json()
+    assert zones, "default venue zones should exist"
+    assert all(z["area_m2"] > 0 and z["capacity"] > 0 for z in zones)
 
 
-def test_incidents_stub_returns_list(client):
+def test_incidents_returns_list(client):
     response = client.get("/api/incidents")
     assert response.status_code == 200
-    assert response.json() == []
+    assert isinstance(response.json(), list)

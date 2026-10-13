@@ -15,13 +15,16 @@ torch>=2.1.0
 torchaudio>=2.1.0
 transformers>=4.35.0
 ultralytics>=8.0.200      # YOLO — AGPL-3.0 license (see README)
+lap>=0.5.12               # ByteTrack assignment solver
+anthropic>=1.0.0          # Claude incident co-pilot (optional — offline templates otherwise)
+openai-whisper>=20240930  # distress keyword spotting (runs locally)
 opencv-python-headless>=4.8.0
 numpy>=1.24.0
 librosa>=0.10.0
 soundfile>=0.12.0
 
 # ── Audio capture ──────────────────────────────────────────────────────
-sounddevice>=0.4.6
+sounddevice>=0.4.6        # local microphone source
 
 # ── System ─────────────────────────────────────────────────────────────
 psutil>=5.9.0

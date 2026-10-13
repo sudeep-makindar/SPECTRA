@@ -65,6 +65,12 @@ class SourceEntry:
         self.total_frames: int = 0
         self._frame_times: list[float] = []
 
+        # Latest preview frames (raw from the adapter, annotated from perception)
+        self.latest_jpeg: Optional[bytes] = None
+        self.latest_ts: float = 0.0
+        self.annotated_jpeg: Optional[bytes] = None
+        self.annotated_ts: float = 0.0
+
         # Task handle for the adapter's run loop
         self._task: Optional[asyncio.Task] = None
 
@@ -78,6 +84,9 @@ class SourceEntry:
         self.total_frames += 1
         self.last_seen = time.time()
         self._update_fps()
+        if packet.frame_jpeg:
+            self.latest_jpeg = packet.frame_jpeg
+            self.latest_ts = packet.ts_capture
 
         if self.queue.full():
             try:
@@ -144,7 +153,14 @@ class SourceEntry:
             "queue_depth": self.queue.qsize(),
             "last_seen": self.last_seen if self.last_seen > 0 else None,
             "last_seen_age_s": round(age, 1) if age is not None else None,
+            "inference_fps": MetricsCollector.instance().source(self.source_id).to_dict()["inference_fps"],
+            "skipped_frames": MetricsCollector.instance().source(self.source_id).skipped_frames,
+            "has_audio": self.has_audio,
         }
+
+    @property
+    def has_audio(self) -> bool:
+        return self.kind == SourceKind.AUDIO or self.adapter_type == "browser_node"
 
 
 class SourceRegistry:

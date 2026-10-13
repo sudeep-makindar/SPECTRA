@@ -51,6 +51,14 @@ class AudioConfig(BaseModel):
     hop_s: float = 1.0
     model_name: str = "MIT/ast-finetuned-audioset-10-10-0.4593"
     model_mode: str = "pretrained"  # "pretrained" | "finetuned:<path>"
+    whisper_enabled: bool = True
+    whisper_model: str = "tiny"
+    # Multilingual distress vocabulary (matched on word boundaries).
+    distress_keywords: list[str] = Field(default_factory=lambda: [
+        "help", "stop", "fire", "gun", "police", "run", "emergency", "ambulance",
+        "bachao", "madad", "bhago", "aag", "बचाओ", "मदद", "भागो", "आग", "पुलिस",
+        "kaapaathunga", "kapadu", "sahayam", "காப்பாத்துங்க", "உதவி", "కాపాడండి", "సహాయం",
+    ])
     threat_groups: dict[str, list[str]] = Field(default_factory=lambda: {
         "high_risk": [
             "Screaming",
@@ -83,6 +91,16 @@ class FusionConfig(BaseModel):
     cooldown_s: float = 15.0
     # Hard-trigger overrides
     gunshot_hard_trigger: float = 0.80
+    # Gated fusion: a single modality can never push risk above its cap.
+    # Corroborated evidence (>=2 modalities active) compounds instead.
+    active_threshold: float = 0.45
+    active_vision: float = 0.60
+    cap_vision: float = 0.72
+    cap_motion: float = 0.50
+    cap_audio: float = 0.50
+    # Vision tuning
+    vision_min_conf: float = 0.30
+    vision_imgsz: int = 640
 
 
 class EvidenceConfig(BaseModel):
@@ -94,9 +112,9 @@ class EvidenceConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    provider: str = ""  # "anthropic" | "gemini" | "" (template only)
-    model: str = ""
-    api_key: str = ""
+    provider: str = "anthropic"  # "anthropic" | "" (template only)
+    model: str = "claude-opus-5-5"
+    api_key: str = ""  # falls back to ANTHROPIC_API_KEY / SDK credential chain
 
 
 class AppConfig(BaseModel):

@@ -371,3 +371,49 @@ class RtspHttpVideoSource(BaseSource):
 
 # Import for metrics
 from app.core.metrics import MetricsCollector
+
+
+# ── LocalMicSource ──────────────────────────────────────────────────────
+
+class LocalMicSource(BaseSource):
+    """Captures audio from the machine's microphone (16 kHz mono, 0.5 s chunks)."""
+
+    def __init__(self, source_id: str, name: str, device: Optional[int | str] = None, sample_rate: int = 16000):
+        super().__init__(source_id, name, SourceKind.AUDIO, {"device": device})
+        self.device = device
+        self.sample_rate = sample_rate
+        self._stream = None
+
+    async def start(self, enqueue: Callable[[SourcePacket], Awaitable[None]]) -> None:
+        import sounddevice as sd
+
+        self.is_running = True
+        loop = asyncio.get_running_loop()
+        q: asyncio.Queue = asyncio.Queue(maxsize=20)
+
+        def _callback(indata, frames, t, status):  # runs on PortAudio's thread
+            chunk = indata[:, 0].copy()
+            loop.call_soon_threadsafe(lambda: q.full() or q.put_nowait(chunk))
+
+        self._stream = sd.InputStream(samplerate=self.sample_rate, channels=1, dtype="float32",
+                                      blocksize=self.sample_rate // 2, device=self.device, callback=_callback)
+        self._stream.start()
+        logger.info("LocalMicSource %s: capturing at %d Hz", self.name, self.sample_rate)
+        try:
+            while self.is_running:
+                chunk = await q.get()
+                await enqueue(self._make_packet(
+                    payload=chunk, ts_capture=time.time(),
+                    metadata={"source_type": "local_mic", "sample_rate": self.sample_rate},
+                ))
+        finally:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
+            logger.info("LocalMicSource %s: stopped", self.name)
+
+    async def stop(self) -> None:
+        self.is_running = False
+
+    def status(self) -> dict:
+        return {"device": self.device, "sample_rate": self.sample_rate}

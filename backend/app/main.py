@@ -17,6 +17,22 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
 from app.core.config import load_config, DATA_DIR, PROJECT_ROOT
+
+
+def _load_dotenv() -> None:
+    """Minimal .env loader (project root) so ANTHROPIC_API_KEY can live in .env."""
+    import os
+    env = PROJECT_ROOT / ".env"
+    if not env.exists():
+        return
+    for line in env.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+_load_dotenv()
 from app.core.logging import setup_logging
 from app.core.metrics import MetricsCollector
 from app.core.device import device_info
@@ -76,6 +92,24 @@ async def lifespan(app: FastAPI):
             )
             await registry.start_source(f"sim-{i+1}")
 
+    # Zones + incident history
+    from app.zones.manager import ZoneManager
+    from app.incidents.store import IncidentStore
+    ZoneManager.instance()
+    IncidentStore.instance()
+
+    # Evaluation report (fast, ~2 s) so the System page always has numbers
+    from app.evaluation.harness import load_report, run_evaluation, save_report
+    import asyncio
+    if not load_report():
+        async def _eval():
+            save_report(await asyncio.to_thread(run_evaluation, 40))
+            logger.info("Initial evaluation report generated")
+        asyncio.create_task(_eval())
+
+    from app.ai.copilot import Copilot
+    logger.info("Claude co-pilot: %s", Copilot.instance().status()["model"])
+
     # Start Evidence Manager (Phase 4)
     evidence = EvidenceManager.instance()
     await evidence.start()
@@ -111,7 +145,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Spectra",
         description="Multimodal crowd-safety intelligence platform",
-        version="0.1.0",
+        version="1.0.0",
         lifespan=lifespan,
     )
 

@@ -1,0 +1,302 @@
+"""
+Claude Co-pilot — incident briefings, operator Q&A and shift handover reports.
+
+Privacy boundary: Claude only ever receives *structured signal metadata*
+(scores, headcounts, density, audio class labels, keyword transcripts, zone
+SOPs). Video frames and raw audio never leave the edge machine.
+
+Every call degrades gracefully: with no API key, a refusal, or a network
+error, the co-pilot falls back to deterministic templates so the control
+room never loses its briefing.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import time
+from typing import Literal, Optional
+
+import anthropic
+from pydantic import BaseModel, Field
+
+from app.core.config import load_config
+
+logger = logging.getLogger("spectra.ai.copilot")
+
+FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
+SYSTEM_PROMPT = """You are SPECTRA's incident co-pilot, embedded in the control room of a large Indian venue \
+(stadiums, concerts, religious gatherings, railway concourses). Operators read your output under time pressure.
+
+You receive structured, privacy-preserving signal data from SPECTRA's on-device perception: YOLO headcounts \
+converted to people/m² and Fruin Level of Service (LoS D ≥1.54/m², E ≥3.57/m², F ≥5/m² = crush danger), \
+baseline-relative optical-flow surges, AST acoustic classes, Whisper distress keywords (English, Hindi, Tamil, \
+Telugu), and the gated fusion score. Fusion caps any single sensor; corroboration across sensors compounds risk.
+
+Rules:
+- SPECTRA is decision support, not a certified safety system. Be calibrated: say what the signals show, how \
+confident you are, and what could make it a false alarm. Never invent facts that are not in the data.
+- Ground recommended actions in the zone's standard operating procedures when they fit, adding others only \
+when the signals clearly call for them. Name the responsible role for each action.
+- Public-address announcements must be calm, short, and directional (tell people where to go). Never use words \
+like "stampede" or "panic" in a PA message.
+- Write plainly. No markdown in structured fields."""
+
+
+class Action(BaseModel):
+    role: str = Field(description="Who acts, e.g. 'Gate stewards', 'Control room', 'Medical team'")
+    action: str = Field(description="One imperative sentence")
+    priority: Literal["now", "next", "monitor"]
+
+
+class IncidentBrief(BaseModel):
+    headline: str = Field(description="≤ 12 words, what is happening and where")
+    summary: str = Field(description="2–3 sentences explaining what the sensors show and why risk is elevated")
+    likely_situation: str = Field(description="Most likely real-world interpretation, one sentence")
+    false_alarm_check: str = Field(description="What could make this a false alarm and how to verify it quickly")
+    confidence: Literal["low", "medium", "high"]
+    recommended_actions: list[Action] = Field(description="3–5 actions, most urgent first")
+    pa_announcement_en: str = Field(description="Calm public-address message in English, ≤ 35 words")
+    pa_announcement_hi: str = Field(description="The same PA message in Hindi (Devanagari script)")
+
+
+class Copilot:
+    _instance: Optional["Copilot"] = None
+
+    def __init__(self) -> None:
+        self._config = load_config()
+        self._client: anthropic.AsyncAnthropic | None = None
+        self.last_error: str | None = None
+        self.calls = 0
+
+    @classmethod
+    def instance(cls) -> "Copilot":
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    @property
+    def model(self) -> str:
+        return self._config.llm.model or "claude-opus-5-5"
+
+    @property
+    def enabled(self) -> bool:
+        return self._config.llm.provider == "anthropic" and bool(
+            self._config.llm.api_key or os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN")
+        )
+
+    def status(self) -> dict:
+        return {"enabled": self.enabled, "model": self.model if self.enabled else "offline templates",
+                "last_error": self.last_error, "calls": self.calls}
+
+    def _get_client(self) -> anthropic.AsyncAnthropic:
+        if self._client is None:
+            key = self._config.llm.api_key or None
+            self._client = anthropic.AsyncAnthropic(api_key=key, timeout=60.0, max_retries=1)
+        return self._client
+
+    # ── Incident briefing ──────────────────────────────────────────────
+
+    async def brief_incident(self, incident_id: str) -> None:
+        from app.incidents.store import IncidentStore
+        from app.zones.manager import ZoneManager
+        from app.fusion.engine import FusionEngine
+
+        store = IncidentStore.instance()
+        inc = store.get(incident_id)
+        if not inc:
+            return
+        zone = ZoneManager.instance().get(inc["zone_id"])
+        context = {
+            "zone": {"name": inc["zone_name"], "kind": zone.kind if zone else None,
+                     "area_m2": zone.area_m2 if zone else None, "safe_capacity": zone.capacity if zone else None,
+                     "standard_operating_procedures": zone.sop if zone else []},
+            "incident": {"trigger_level": inc["trigger_level"], "peak_level": inc["peak_level"],
+                         "peak_risk": inc["peak_risk"], "seconds_since_start": round(time.time() - inc["started_at"]),
+                         "simulated_scenario": inc.get("scenario")},
+            "signals_at_peak": self._signal_view(inc["peak_snapshot"]),
+            "risk_trend_last_60s": [round(p[1], 2) for p in inc["timeline"][-120:][::4]],
+            "recent_events": [e["message"] for e in FusionEngine.instance().events(15)
+                              if e["zone_id"] == inc["zone_id"]][-8:],
+        }
+
+        brief, source = None, "template"
+        if self.enabled:
+            try:
+                brief = await self._claude_brief(context)
+                source = "claude"
+            except Exception as exc:
+                self.last_error = f"{type(exc).__name__}: {exc}"[:300]
+                logger.warning("Claude briefing failed, using template: %s", self.last_error)
+        if brief is None:
+            brief = self._template_brief(inc, zone)
+
+        inc = store.get(incident_id)
+        if inc is None:
+            return
+        inc["brief"] = {**brief, "source": source, "model": self.model if source == "claude" else None,
+                        "generated_at": time.time(), "for_level": inc["peak_level"]}
+        inc["brief_status"] = "ready"
+        store.add_log(incident_id, "briefed", "copilot",
+                      f"Briefing generated by {'Claude' if source == 'claude' else 'offline template'}")
+        FusionEngine.instance().log_event(inc["zone_id"], "brief_ready", "info",
+                                          f"AI brief: {brief['headline']}", incident_id=incident_id)
+
+    @staticmethod
+    def _signal_view(snap: dict) -> dict:
+        return {
+            "fused_risk": snap.get("risk_score"),
+            "alert_level": snap.get("alert_level"),
+            "people_count": snap.get("people_count"),
+            "density_people_per_m2": snap.get("density_ppm2"),
+            "fruin_los": f"{snap.get('los')} — {snap.get('los_desc')}",
+            "people_down": snap.get("fallen_count"),
+            "heading_chaos_0to1": snap.get("chaos_index"),
+            "modality_scores": {m: (snap.get(m) or {}).get("score") for m in ("vision", "motion", "audio")},
+            "active_modalities": snap.get("active_modalities"),
+            "cross_modal_confirmed": snap.get("corroborated"),
+            "gunshot_signature": snap.get("hard_trigger"),
+            "audio_class": snap.get("audio_label"),
+            "distress_keyword": snap.get("keyword"),
+            "transcript": snap.get("transcript"),
+            "sensor_reasons": snap.get("reasons"),
+            "forecast": snap.get("forecast"),
+            "blind_spot": snap.get("blind_spot"),
+        }
+
+    async def _claude_brief(self, context: dict) -> dict:
+        self.calls += 1
+        resp = await self._get_client().beta.messages.parse(
+            model=self.model,
+            max_tokens=4000,
+            system=SYSTEM_PROMPT,
+            output_config={"effort": "low"},  # briefings must land in seconds
+            output_format=IncidentBrief,
+            betas=[FALLBACK_BETA],
+            fallbacks="default",
+            messages=[{"role": "user", "content":
+                       "Brief the control room on this incident. Signal data:\n"
+                       + json.dumps(context, ensure_ascii=False, indent=1)}],
+        )
+        if resp.stop_reason == "refusal" or resp.parsed_output is None:
+            raise RuntimeError(f"no structured output (stop_reason={resp.stop_reason})")
+        self.last_error = None
+        return resp.parsed_output.model_dump()
+
+    @staticmethod
+    def _template_brief(inc: dict, zone) -> dict:
+        snap = inc["peak_snapshot"]
+        reasons = snap.get("reasons") or ["Fused risk crossed the alert threshold"]
+        level = inc["peak_level"].upper()
+        sop = (zone.sop if zone else []) or ["Dispatch nearest stewards to the zone"]
+        actions = [{"role": "Control room", "action": f"Put {inc['zone_name']} cameras on the main wall and verify visually", "priority": "now"}]
+        actions += [{"role": "Zone stewards", "action": s, "priority": "next"} for s in sop[:3]]
+        return {
+            "headline": f"{level} risk at {inc['zone_name']}",
+            "summary": "; ".join(reasons[:3]) + ".",
+            "likely_situation": "Automated template — verify on camera before acting.",
+            "false_alarm_check": "Confirm on the live feed; single-sensor spikes are capped by fusion but may still be benign.",
+            "confidence": "high" if snap.get("corroborated") else "medium",
+            "recommended_actions": actions,
+            "pa_announcement_en": f"Attention please. To keep everyone comfortable, please move slowly away from {inc['zone_name']} and follow steward directions.",
+            "pa_announcement_hi": f"कृपया ध्यान दें। कृपया {inc['zone_name']} से धीरे-धीरे दूर जाएँ और स्टीवर्ड के निर्देशों का पालन करें।",
+        }
+
+    # ── Operator Q&A ───────────────────────────────────────────────────
+
+    async def ask(self, question: str) -> dict:
+        from app.fusion.engine import FusionEngine
+        from app.incidents.store import IncidentStore
+
+        engine = FusionEngine.instance()
+        zones = []
+        for zid in list(engine._zones):
+            z = engine.get_zone(zid)
+            if z:
+                zones.append({"zone": z.name, **self._signal_view(z.to_dict(include_history=False)),
+                              "risk_trend_per_min": z.forecast.get("slope_per_min"),
+                              "sources_online": z.sources_online})
+        context = {
+            "zones": zones,
+            "recent_events": [f"{time.strftime('%H:%M:%S', time.localtime(e['ts']))} {e['message']}"
+                              for e in engine.events(25)],
+            "incidents": IncidentStore.instance().summaries(10),
+        }
+        if not self.enabled:
+            hottest = max(zones, key=lambda z: z["fused_risk"] or 0, default=None)
+            answer = ("Claude is offline (no ANTHROPIC_API_KEY), so here is the raw picture. "
+                      + (f"Highest risk: {hottest['zone']} at {hottest['fused_risk']:.2f} "
+                         f"({hottest['alert_level']}). " + "; ".join(hottest["sensor_reasons"] or [])
+                         if hottest else "No zones."))
+            return {"answer": answer, "source": "template"}
+        try:
+            self.calls += 1
+            resp = await self._get_client().beta.messages.create(
+                model=self.model,
+                max_tokens=2000,
+                system=SYSTEM_PROMPT + "\n\nNow answer an operator's question about the live situation in "
+                       "≤ 120 words. Lead with the answer. Plain sentences or a short dash list; no headings.",
+                output_config={"effort": "low"},
+                betas=[FALLBACK_BETA],
+                fallbacks="default",
+                messages=[{"role": "user", "content":
+                           f"Live state:\n{json.dumps(context, ensure_ascii=False, default=str)}\n\n"
+                           f"Operator question: {question}"}],
+            )
+            text = "".join(b.text for b in resp.content if b.type == "text").strip()
+            if resp.stop_reason == "refusal" or not text:
+                raise RuntimeError(f"empty answer (stop_reason={resp.stop_reason})")
+            self.last_error = None
+            return {"answer": text, "source": "claude", "model": self.model}
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"[:300]
+            logger.warning("Claude ask failed: %s", self.last_error)
+            return {"answer": f"Co-pilot unavailable ({type(exc).__name__}). Check the zone cards directly.",
+                    "source": "error"}
+
+    # ── Shift handover ─────────────────────────────────────────────────
+
+    async def shift_report(self) -> dict:
+        from app.incidents.store import IncidentStore
+        incidents = []
+        for inc in IncidentStore.instance().all()[:25]:
+            brief = inc.get("brief") or {}
+            incidents.append({
+                "zone": inc["zone_name"],
+                "start": time.strftime("%H:%M:%S", time.localtime(inc["started_at"])),
+                "duration_s": round((inc["ended_at"] or time.time()) - inc["started_at"]),
+                "peak_level": inc["peak_level"], "peak_risk": inc["peak_risk"],
+                "status": inc["status"], "simulated": bool(inc.get("scenario")),
+                "headline": brief.get("headline"),
+                "reasons": (inc.get("peak_snapshot") or {}).get("reasons"),
+                "operator_log": [f"{l['action']}: {l['note']}" for l in inc["log"] if l["by"] == "operator"],
+            })
+        if not incidents:
+            return {"report": "No incidents recorded this shift.", "source": "template"}
+        if not self.enabled:
+            lines = [f"- {i['start']} {i['zone']}: {i['peak_level'].upper()} (risk {i['peak_risk']}), "
+                     f"{i['duration_s']}s, status {i['status']}" for i in incidents]
+            return {"report": "Shift handover (offline template)\n\n" + "\n".join(lines), "source": "template"}
+        try:
+            self.calls += 1
+            resp = await self._get_client().beta.messages.create(
+                model=self.model,
+                max_tokens=6000,
+                system=SYSTEM_PROMPT + "\n\nWrite a shift handover report in Markdown for the incoming "
+                       "control-room lead: overview (2 sentences), incidents table (time, zone, peak, status), "
+                       "open items needing follow-up, patterns worth watching next shift, and sensor/coverage "
+                       "issues. Mark simulated drills as drills. Keep it under 350 words.",
+                output_config={"effort": "medium"},
+                betas=[FALLBACK_BETA],
+                fallbacks="default",
+                messages=[{"role": "user", "content": json.dumps({"incidents": incidents}, ensure_ascii=False)}],
+            )
+            text = "".join(b.text for b in resp.content if b.type == "text").strip()
+            if resp.stop_reason == "refusal" or not text:
+                raise RuntimeError(f"empty report (stop_reason={resp.stop_reason})")
+            return {"report": text, "source": "claude", "model": self.model}
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"[:300]
+            return {"report": f"Co-pilot unavailable ({type(exc).__name__}).", "source": "error"}

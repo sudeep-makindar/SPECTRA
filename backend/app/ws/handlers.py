@@ -1,9 +1,9 @@
 """
 WebSocket endpoints for Spectra.
 
-/ws/live — pushes live state (per-zone risk, per-source status, alerts) to the dashboard.
+/ws/live — pushes live state (per-zone risk, per-source status, events, metrics) to the dashboard.
 /ws/node — ingestion from browser-based source nodes (getUserMedia).
-/ws/preview/<source_id> — streams JPEG frames for camera preview tiles.
+/ws/preview/<source_id> — streams annotated JPEG frames for camera preview tiles.
 """
 
 from __future__ import annotations
@@ -12,63 +12,52 @@ import asyncio
 import json
 import logging
 import time
-from typing import Optional
 
+import cv2
+import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 
-from app.ingest.registry import SourceRegistry
-from app.ingest.base import SourcePacket, SourceKind
 from app.core.metrics import MetricsCollector
 from app.fusion.engine import FusionEngine
+from app.ingest.base import SourcePacket, SourceKind
+from app.ingest.registry import SourceRegistry
 
 logger = logging.getLogger("spectra.ws")
 router = APIRouter()
 
-# Track connected dashboard clients
 _live_clients: set[WebSocket] = set()
+
+
+def live_payload() -> dict:
+    from app.incidents.store import IncidentStore
+    from app.scenarios.director import ScenarioDirector
+    from app.zones.manager import ZoneManager
+
+    registry = SourceRegistry.instance()
+    fusion = FusionEngine.instance()
+    sources = registry.to_list()
+    active = sum(1 for s in sources if s.get("status") == "online")
+    payload = fusion.get_system_state(active, len(sources)).to_dict()
+    payload["sources"] = sources
+    payload["zone_configs"] = [z.to_dict() for z in ZoneManager.instance().all()]
+    payload["events"] = fusion.events(60)
+    payload["incidents"] = IncidentStore.instance().summaries(20)
+    payload["scenarios"] = ScenarioDirector.instance().active()
+    payload["metrics"] = MetricsCollector.instance().snapshot()
+    return {"type": "state", "ts": time.time(), **payload}
 
 
 # ── /ws/live — Dashboard live feed ─────────────────────────────────────
 
 @router.websocket("/ws/live")
 async def ws_live(ws: WebSocket):
-    """Push live state to the dashboard at ~2-5 Hz.
-
-    Sends JSON messages with:
-    - sources: per-source status (fps, drops, last_seen, status)
-    - zones: per-zone risk score and state (Phase 3+)
-    - alerts: new alert events (Phase 4+)
-    """
     await ws.accept()
     _live_clients.add(ws)
     logger.info("Dashboard client connected (%d total)", len(_live_clients))
-
     try:
         while True:
-            registry = SourceRegistry.instance()
-            fusion = FusionEngine.instance()
-            
-            sources = registry.to_list()
-            total_sources = len(sources)
-            active_sources = sum(1 for s in sources if s.get("status") == "online")
-
-            # Get system state
-            system_state = fusion.get_system_state(active_sources, total_sources)
-            payload = system_state.to_dict()
-            
-            # Attach system metrics and sources
-            payload["sources"] = sources
-            payload["metrics"] = MetricsCollector.instance().snapshot()
-
-            state = {
-                "type": "state",
-                "ts": time.time(),
-                **payload
-            }
-
-            await ws.send_json(state)
-            await asyncio.sleep(0.5)  # ~2 Hz base rate
-
+            await ws.send_json(live_payload())
+            await asyncio.sleep(0.5)
     except WebSocketDisconnect:
         pass
     except Exception as exc:
@@ -78,34 +67,20 @@ async def ws_live(ws: WebSocket):
         logger.info("Dashboard client disconnected (%d remaining)", len(_live_clients))
 
 
-async def broadcast_alert(alert_data: dict) -> None:
-    """Broadcast a new alert to all connected dashboard clients."""
-    message = {"type": "alert", "ts": time.time(), **alert_data}
-    dead = set()
-    for ws in _live_clients:
-        try:
-            await ws.send_json(message)
-        except Exception:
-            dead.add(ws)
-    _live_clients -= dead
-
-
 # ── /ws/node — Browser source ingestion ────────────────────────────────
 
 @router.websocket("/ws/node")
 async def ws_node(ws: WebSocket, token: str = Query(...)):
-    """Ingestion WebSocket for browser-based source nodes.
+    """Ingestion WebSocket for browser-based source nodes (phones, laptops).
 
-    A phone or laptop opens /node, picks camera/mic, and sends:
-    - Video: JPEG frames at ~5fps with a JSON header
-    - Audio: 16kHz PCM16 chunks with a JSON header
-
-    Authentication: per-source token created in the UI.
+    Binary protocol: [uint32 BE header length][JSON header][payload]
+    - video: JPEG frame
+    - audio: PCM16 mono, header carries sample_rate
     """
-    # Authenticate
+    from app.perception.workers import PerceptionManager
+
     registry = SourceRegistry.instance()
     entry = registry.get_by_token(token)
-
     if not entry:
         await ws.close(code=4001, reason="Invalid token")
         logger.warning("Node connection rejected: invalid token")
@@ -114,73 +89,55 @@ async def ws_node(ws: WebSocket, token: str = Query(...)):
     await ws.accept()
     logger.info("Node connected: %s (%s)", entry.name, entry.source_id)
     entry.status = "online"
+    perception = PerceptionManager.instance()
 
     try:
         while True:
-            # Receive binary (frame/audio) or text (metadata) messages
             data = await ws.receive()
+            if data.get("type") == "websocket.disconnect":
+                break
 
-            if "bytes" in data:
+            if data.get("bytes"):
                 raw = data["bytes"]
-                # Binary protocol: first 4 bytes = header length (uint32 BE)
-                # Next header_len bytes = JSON header
-                # Remaining = payload (JPEG for video, PCM16 for audio)
                 if len(raw) < 4:
                     continue
-
                 header_len = int.from_bytes(raw[:4], "big")
                 if len(raw) < 4 + header_len:
                     continue
-
                 try:
                     header = json.loads(raw[4:4 + header_len])
                 except json.JSONDecodeError:
                     continue
-
                 payload_bytes = raw[4 + header_len:]
+                # Phone clocks drift; stamp with server time for consistent latency metrics.
+                ts = time.time()
 
                 if header.get("type") == "video":
-                    # Payload is a JPEG frame
-                    import numpy as np
-                    import cv2
-                    nparr = np.frombuffer(payload_bytes, np.uint8)
-                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    frame = cv2.imdecode(np.frombuffer(payload_bytes, np.uint8), cv2.IMREAD_COLOR)
                     if frame is None:
                         continue
-
-                    packet = SourcePacket(
-                        source_id=entry.source_id,
-                        kind=SourceKind.VIDEO,
-                        ts_capture=header.get("ts", time.time()),
-                        payload=frame,
-                        frame_jpeg=payload_bytes,  # Already JPEG
+                    await entry.enqueue(SourcePacket(
+                        source_id=entry.source_id, kind=SourceKind.VIDEO, ts_capture=ts,
+                        payload=frame, frame_jpeg=payload_bytes,
                         metadata={"source_type": "browser_node"},
-                    )
-                    await entry.enqueue(packet)
-
+                    ))
                 elif header.get("type") == "audio":
-                    # Payload is PCM16 audio chunk
-                    import numpy as np
                     audio = np.frombuffer(payload_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                    # Audio bypasses the latest-wins video queue: dropping audio chunks would leave gaps.
+                    entry.last_seen = time.time()
+                    await perception.process_packet(SourcePacket(
+                        source_id=entry.source_id, kind=SourceKind.AUDIO, ts_capture=ts, payload=audio,
+                        metadata={"source_type": "browser_node", "sample_rate": header.get("sample_rate", 16000)},
+                    ))
 
-                    packet = SourcePacket(
-                        source_id=entry.source_id,
-                        kind=SourceKind.AUDIO,
-                        ts_capture=header.get("ts", time.time()),
-                        payload=audio,
-                        metadata={
-                            "source_type": "browser_node",
-                            "sample_rate": header.get("sample_rate", 16000),
-                        },
-                    )
-                    await entry.enqueue(packet)
-
-            elif "text" in data:
-                # Text messages for control (ping, status)
+            elif data.get("text"):
                 try:
                     msg = json.loads(data["text"])
                     if msg.get("type") == "ping":
-                        await ws.send_json({"type": "pong", "ts": time.time()})
+                        zone = FusionEngine.instance().get_zone(FusionEngine.instance().zone_of_source(entry.source_id))
+                        await ws.send_json({"type": "pong", "ts": time.time(),
+                                            "zone": zone.name if zone else None,
+                                            "level": zone.alert_level if zone else None})
                 except json.JSONDecodeError:
                     pass
 
@@ -196,40 +153,26 @@ async def ws_node(ws: WebSocket, token: str = Query(...)):
 # ── /ws/preview/<source_id> — Camera preview stream ───────────────────
 
 @router.websocket("/ws/preview/{source_id}")
-async def ws_preview(ws: WebSocket, source_id: str):
-    """Stream JPEG frames for a camera's preview tile in the dashboard.
+async def ws_preview(ws: WebSocket, source_id: str, raw: int = 0):
+    """Stream the latest annotated frame (falls back to the raw frame) at ~8 fps.
 
-    Sends binary JPEG frames at ~5 fps. If the source has no new frame,
-    it waits briefly rather than resending stale data.
+    Reads the source's latest-frame slot rather than its queue, so previews
+    never steal frames from the inference workers.
     """
-    registry = SourceRegistry.instance()
-    entry = registry.get(source_id)
-
+    entry = SourceRegistry.instance().get(source_id)
     if not entry:
         await ws.close(code=4004, reason="Source not found")
         return
-
     await ws.accept()
-    logger.debug("Preview client connected for source %s", source_id)
-
-    last_sent_ts = 0.0
-
+    last = None
     try:
         while True:
-            # Try to get the latest frame from the queue without blocking
-            try:
-                packet = entry.queue.get_nowait()
-                if packet.frame_jpeg and packet.ts_capture > last_sent_ts:
-                    await ws.send_bytes(packet.frame_jpeg)
-                    last_sent_ts = packet.ts_capture
-                # Put it back for inference workers
-                if not entry.queue.full():
-                    await entry.queue.put(packet)
-            except asyncio.QueueEmpty:
-                pass
-
-            await asyncio.sleep(0.2)  # ~5 Hz max
-
+            fresh_annotated = entry.annotated_jpeg and time.time() - entry.annotated_ts < 2.0
+            frame = entry.latest_jpeg if (raw or not fresh_annotated) else entry.annotated_jpeg
+            if frame is not None and frame is not last:
+                await ws.send_bytes(frame)
+                last = frame
+            await asyncio.sleep(0.12)
     except WebSocketDisconnect:
         pass
     except Exception as exc:

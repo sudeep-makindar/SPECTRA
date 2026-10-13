@@ -10,7 +10,7 @@ weight_motion: 0.35
 weight_audio: 0.30
 
 # Cross-modal confirmation
-cross_modal_multiplier: 1.4   # Boost when ≥2 modalities agree
+cross_modal_multiplier: 1.2   # Boost when ≥2 modalities agree (applied to noisy-OR of capped evidence)
 cross_modal_window_s: 3.0     # Time window for cross-modal matching
 single_modal_dampen: 0.7      # Dampen when only 1 modality fires
 
@@ -32,4 +32,14 @@ threshold_critical_down: 0.65
 cooldown_s: 15.0
 
 # Hard-trigger overrides — these can reach HIGH alone regardless of fusion
-gunshot_hard_trigger: 0.80
+gunshot_hard_trigger: 0.60   # AST gunshot/explosion probability for the instant-HIGH trigger
+
+# Gated fusion — per-modality caps. A single sensor alone can never exceed its
+# cap, so a lone scream (or loud music) cannot raise a CRITICAL alarm.
+active_threshold: 0.45
+active_vision: 0.60  # density only corroborates at ≈2.4 people/m² (LoS D+)
+cap_vision: 0.72   # a crush-level density alone can reach HIGH
+cap_motion: 0.50   # motion alone (camera shake, lighting) tops out at ELEVATED
+cap_audio: 0.50    # audio alone tops out at ELEVATED
+
+vision_min_conf: 0.30

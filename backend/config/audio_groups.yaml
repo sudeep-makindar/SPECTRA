@@ -2,43 +2,32 @@
 # Spectra — Audio Threat Group Mapping
 # ──────────────────────────────────────────────────────────────────────
 # Maps AudioSet class labels → threat groups used by the fusion engine.
-# Edit this file to customize which sounds are considered threats.
-# Labels are matched case-insensitively against the AST model output.
+# Labels must match the AST model's AudioSet label names exactly.
+# AST is multi-label: each label gets an independent sigmoid probability.
 
 groups:
   scream:
-    labels:
-      - "Screaming"
-      - "Shout"
-      - "Yell"
-      - "Crying"
-      - "Sobbing"
-      - "Wail"
+    labels: ["Screaming", "Shout", "Yell", "Crying, sobbing", "Wail, moan", "Battle cry"]
     weight: 1.0
 
   gunshot:
-    labels:
-      - "Gunshot, gunfire"
-      - "Machine gun"
-      - "Explosion"
-      - "Cap gun"
+    labels: ["Gunshot, gunfire", "Machine gun", "Explosion", "Cap gun"]
     weight: 1.0
-    hard_trigger: true   # Can reach HIGH alone (see fusion.yaml gunshot_hard_trigger)
+    hard_trigger: true   # instant HIGH (see fusion.yaml gunshot_hard_trigger)
 
   glass:
-    labels:
-      - "Glass"
-      - "Shatter"
-      - "Breaking"
+    labels: ["Glass", "Shatter", "Breaking"]
     weight: 0.7
 
-  ambient_panic:
-    labels:
-      - "Crowd"
-      - "Stampede"
-      - "Alarm"
-      - "Siren"
-      - "Emergency vehicle"
-    weight: 0.5
+  alarm:
+    labels: ["Alarm", "Siren", "Emergency vehicle", "Smoke detector, smoke alarm", "Fire alarm"]
+    weight: 0.6
 
-# Labels not in any group are ignored (ambient noise, music, speech, etc.)
+  crowd:
+    labels: ["Crowd", "Children shouting"]
+    weight: 0.3          # crowds are normal at venues — weak evidence only
+
+# Benign look-alikes. If one of these is more likely than the gunshot group,
+# the hard trigger is suppressed (Diwali crackers, stage pyrotechnics, music).
+suppressors:
+  gunshot: ["Fireworks", "Firecracker", "Music", "Drum", "Bass drum", "Clapping"]
