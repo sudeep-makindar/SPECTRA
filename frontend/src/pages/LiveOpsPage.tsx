@@ -1,71 +1,62 @@
 /**
- * Live Ops page — primary monitoring view.
- * Phase 0: layout skeleton with camera tile placeholders.
- * Phase 1+: live camera tiles, alert feed, zone-focused charts.
+ * Live Ops — every feed with the AI overlay, grouped by zone, beside the
+ * event log and a compact scenario director.
  */
 
-import { useSpectraSocket } from '../hooks/useSpectraSocket';
+import { useState } from 'react';
+import { useSpectra } from '../context/SpectraContext';
 import { CameraTile } from '../components/CameraTile';
+import { EventFeed } from '../components/EventFeed';
+import { AddSourceDialog } from '../components/AddSourceDialog';
+import { ScenarioPanel } from '../components/ScenarioPanel';
 
 export function LiveOpsPage() {
-  const state = useSpectraSocket();
-  const videoSources = state.sources.filter(s => s.kind === 'video');
+  const s = useSpectra();
+  const [adding, setAdding] = useState(false);
 
   return (
-    <div style={{ padding: '8px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-      {/* Camera tiles row */}
-      <div style={{ display: 'flex', gap: '8px', overflowX: 'auto', paddingBottom: '4px' }}>
-        {videoSources.length > 0 ? (
-          videoSources.map(source => (
-            <CameraTile key={source.id} source={source} />
-          ))
-        ) : (
-          <div
-            className="card card-dark"
-            style={{
-              minWidth: '280px',
-              height: '220px',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-          >
-            <div className="empty-state" style={{ padding: 0 }}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ width: 32, height: 32 }}>
-                <rect x="2" y="4" width="20" height="14" rx="2" />
-                <path d="M15 11l5-3v8l-5-3" />
-              </svg>
-              <p>No video sources connected</p>
+    <div className="page">
+      {adding && <AddSourceDialog onClose={() => setAdding(false)} />}
+      <div className="grid-12">
+        <div className="span-9" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {s.sources.length === 0 && (
+            <div className="card card-dark" style={{ minHeight: 280, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 12 }}>
+              <div className="display" style={{ fontSize: '2rem' }}>No feeds yet</div>
+              <div className="muted" style={{ fontSize: '0.85rem' }}>Add this Mac's camera and mic, pair a phone by QR, or loop a recorded video.</div>
+              <button className="btn btn-primary" onClick={() => setAdding(true)}>Connect device</button>
             </div>
-          </div>
-        )}
-      </div>
-
-      {/* Bento grid — same layout concept as Overview but focused on live data */}
-      <div className="bento-grid">
-        {/* Alert feed */}
-        <div className="card card-dark" style={{ gridColumn: 'span 2', minHeight: '200px' }}>
-          <div className="card-label">Alert Feed</div>
-          <div className="empty-state">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ width: 48, height: 48 }}>
-              <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
-              <path d="M13.73 21a2 2 0 0 1-3.46 0" />
-            </svg>
-            <p>No alerts yet. Alerts appear when risk thresholds are exceeded.</p>
-          </div>
+          )}
+          {s.zone_configs.map(cfg => {
+            const srcs = s.sources.filter(x => x.zone_id === cfg.id);
+            if (!srcs.length) return null;
+            const z = s.zones[cfg.id];
+            return (
+              <div key={cfg.id} className="card card-dark" style={{ padding: 14 }}>
+                <div className="section-title" style={{ marginBottom: 10 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <span className="zone-name" style={{ fontSize: '1.2rem' }}>{cfg.name}</span>
+                    {z && <span className={`level-pill level-${z.alert_level}`}>{z.alert_level} · {Math.round(z.risk_score * 100)}</span>}
+                    {z?.scenario && <span className="sim-badge">sim</span>}
+                  </div>
+                  {z && <span className="muted" style={{ fontSize: '0.75rem' }}>{z.people_count} pax · {z.density_ppm2.toFixed(1)}/m² · LoS {z.los}</span>}
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 8 }}>
+                  {srcs.map(src => <CameraTile key={src.id} source={src} />)}
+                </div>
+              </div>
+            );
+          })}
         </div>
-
-        {/* Zone risk summary */}
-        <div className="card card-dark" style={{ gridColumn: 'span 1', minHeight: '200px' }}>
-          <div className="card-label">Zone Risk Summary</div>
-          <div className="empty-state">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ width: 48, height: 48 }}>
-              <rect x="3" y="3" width="18" height="18" rx="3" />
-              <line x1="12" y1="3" x2="12" y2="21" />
-              <line x1="3" y1="12" x2="21" y2="12" />
-            </svg>
-            <p>Create zones and assign sources to see risk levels.</p>
+        <div className="span-3" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <button className="card card-lavender" style={{ border: 'none', textAlign: 'left', cursor: 'pointer', padding: 20 }} onClick={() => setAdding(true)}>
+            <div className="card-title-display">Connect device</div>
+            <div style={{ fontSize: '0.75rem', marginTop: 6 }}>Mac camera · mic · phone QR · RTSP</div>
+          </button>
+          <div className="card card-dark">
+            <div className="card-label">Event log</div>
+            <EventFeed height={420} />
           </div>
+          <ScenarioPanel compact />
         </div>
       </div>
     </div>

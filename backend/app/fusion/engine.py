@@ -313,7 +313,7 @@ class FusionEngine:
         elif z.audio.score >= 0.3 and z.audio_label:
             weighted.append((z.audio.score, f"Acoustic threat: {z.audio_label} ({z.audio.score:.0%})"))
         if z.keyword and z.audio.score >= 0.3:
-            weighted.append((z.audio.score - 0.01, f"Distress keyword “{z.keyword}” heard: “{z.transcript[:60]}”"))
+            weighted.append((min(1.0, z.audio.score + 0.15), f"Distress keyword “{z.keyword}” heard: “{z.transcript[:60]}”"))
         r = [text for _, text in sorted(weighted, key=lambda x: -x[0])]
         if z.corroborated:
             r.append("Cross-modal confirmation: " + " + ".join(z.active_modalities) + " agree")

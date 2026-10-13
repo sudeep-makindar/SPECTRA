@@ -1,187 +1,110 @@
 /**
- * CameraTile — live preview for a video source.
- *
- * Shows: JPEG preview stream, status dot, FPS, SIM/LIVE badge,
- * source name, and last-seen age for degraded/offline sources.
+ * CameraTile — live annotated feed for a video source (tracked boxes, IDs,
+ * optical-flow arrows, HUD), with zone assignment and health overlays.
  */
 
 import { useEffect, useRef, useState } from 'react';
-import type { SourceState } from '../hooks/useSpectraSocket';
+import { useSpectra } from '../context/SpectraContext';
+import { api } from '../lib/types';
+import type { SourceState } from '../lib/types';
 
-interface CameraTileProps {
-  source: SourceState;
-}
-
-export function CameraTile({ source }: CameraTileProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const [previewActive, setPreviewActive] = useState(false);
+export function CameraTile({ source, showControls = true }: { source: SourceState; showControls?: boolean }) {
+  const { zones, zone_configs } = useSpectra();
+  const imgRef = useRef<HTMLImageElement>(null);
+  const [hasFrame, setHasFrame] = useState(false);
+  const [raw, setRaw] = useState(false);
+  const offline = source.status === 'offline' && !hasFrame;
+  const isAudio = source.kind === 'audio';
 
   useEffect(() => {
-    if (source.status === 'offline') return;
-
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${protocol}//${window.location.host}/ws/preview/${source.id}`;
-    const ws = new WebSocket(url);
+    if (isAudio) return;
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${proto}//${window.location.host}/ws/preview/${source.id}?raw=${raw ? 1 : 0}`);
     ws.binaryType = 'arraybuffer';
-    wsRef.current = ws;
-
-    ws.onopen = () => setPreviewActive(true);
-
-    ws.onmessage = (event) => {
-      const blob = new Blob([event.data], { type: 'image/jpeg' });
-      const imgUrl = URL.createObjectURL(blob);
-      const img = new Image();
-      img.onload = () => {
-        const canvas = canvasRef.current;
-        if (canvas) {
-          canvas.width = img.width;
-          canvas.height = img.height;
-          const ctx = canvas.getContext('2d');
-          ctx?.drawImage(img, 0, 0);
-        }
-        URL.revokeObjectURL(imgUrl);
-      };
-      img.src = imgUrl;
+    let prevUrl: string | null = null;
+    ws.onmessage = ev => {
+      const url = URL.createObjectURL(new Blob([ev.data], { type: 'image/jpeg' }));
+      if (imgRef.current) imgRef.current.src = url;
+      if (prevUrl) URL.revokeObjectURL(prevUrl);
+      prevUrl = url;
+      setHasFrame(true);
     };
-
-    ws.onclose = () => setPreviewActive(false);
     ws.onerror = () => ws.close();
+    return () => { ws.close(); if (prevUrl) URL.revokeObjectURL(prevUrl); };
+  }, [source.id, raw, isAudio, source.status]);
 
-    return () => {
-      ws.close();
-    };
-  }, [source.id, source.status]);
+  const zone = source.zone_id ? zones[source.zone_id] : undefined;
+  const statusColor = { online: 'var(--color-online)', degraded: 'var(--color-degraded)', error: 'var(--color-error)' }[source.status] ?? 'var(--color-offline)';
+  const alarm = zone && (zone.alert_level === 'high' || zone.alert_level === 'critical');
 
-  const statusColor = {
-    online: 'var(--color-online)',
-    offline: 'var(--color-offline)',
-    degraded: 'var(--color-degraded)',
-    calibrating: 'var(--color-lavender)',
-    error: 'var(--color-error)',
-  }[source.status] || 'var(--color-offline)';
-
-  const isSimulated = source.adapter === 'simulated';
+  const assign = (zid: string) => api(`/api/sources/${source.id}`, { method: 'PATCH', json: { zone_id: zid } });
+  const remove = () => { if (confirm(`Remove ${source.name}?`)) api(`/api/sources/${source.id}`, { method: 'DELETE' }); };
 
   return (
-    <div className="card card-dark" style={{
-      minWidth: '280px',
-      height: '220px',
-      position: 'relative',
-      overflow: 'hidden',
-      padding: 0,
-    }}>
-      {/* Preview canvas / placeholder */}
-      {source.status !== 'offline' ? (
-        <canvas
-          ref={canvasRef}
-          style={{
-            width: '100%',
-            height: '100%',
-            objectFit: 'cover',
-            display: 'block',
-            borderRadius: 'var(--radius-card)',
-          }}
-        />
-      ) : (
-        <div style={{
-          width: '100%',
-          height: '100%',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          flexDirection: 'column',
-          gap: '8px',
-          color: 'var(--color-text-muted)',
-        }}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ width: 32, height: 32 }}>
-            <rect x="2" y="4" width="20" height="14" rx="2" />
-            <line x1="2" y1="4" x2="22" y2="18" strokeLinecap="round" />
-          </svg>
-          <span style={{ fontSize: '0.75rem' }}>No signal</span>
-        </div>
-      )}
-
-      {/* Overlay: top info bar */}
-      <div style={{
-        position: 'absolute',
-        top: 0,
-        left: 0,
-        right: 0,
-        padding: '10px 12px',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        background: 'linear-gradient(rgba(0,0,0,0.6), transparent)',
-        borderRadius: 'var(--radius-card) var(--radius-card) 0 0',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <span className="status-dot" style={{ background: statusColor }} />
-          <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#fff' }}>
-            {source.name}
-          </span>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-          {isSimulated && <span className="badge badge-sim">SIM</span>}
-          {!isSimulated && source.status === 'online' && <span className="badge badge-live">LIVE</span>}
-        </div>
-      </div>
-
-      {/* Overlay: bottom stats bar */}
-      <div style={{
-        position: 'absolute',
-        bottom: 0,
-        left: 0,
-        right: 0,
-        padding: '8px 12px',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        background: 'linear-gradient(transparent, rgba(0,0,0,0.6))',
-        borderRadius: '0 0 var(--radius-card) var(--radius-card)',
-        fontSize: '0.7rem',
-        color: 'rgba(255,255,255,0.7)',
-      }}>
-        <span className="tabular-nums">{source.fps} fps</span>
-        {source.dropped_frames > 0 && (
-          <span style={{ color: 'var(--color-degraded)' }}>
-            {source.dropped_frames} dropped
-          </span>
+    <div className="card card-dark" style={{ padding: 0, overflow: 'hidden', boxShadow: alarm ? `inset 0 0 0 2px var(--color-risk-${zone!.alert_level})` : undefined }}>
+      <div className="camera-wrap">
+        {isAudio ? (
+          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 8 }}>
+            <AudioBars level={zone?.audio.score ?? 0} active={source.status === 'online'} />
+            <span className="muted" style={{ fontSize: '0.75rem' }}>{zone?.audio_label ?? 'Listening…'}</span>
+            {zone?.transcript && <span className="mono" style={{ fontSize: '0.72rem', maxWidth: '85%', textAlign: 'center' }}>“{zone.transcript}”</span>}
+          </div>
+        ) : (
+          <img ref={imgRef} alt={`${source.name} live feed`} style={{ opacity: hasFrame ? 1 : 0 }} />
         )}
-        {source.last_seen_age_s != null && source.last_seen_age_s > 5 && (
-          <span style={{ color: 'var(--color-degraded)' }}>
-            {source.last_seen_age_s.toFixed(0)}s ago
-          </span>
+        {!isAudio && !hasFrame && (
+          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }} className="dim">
+            {offline ? 'No signal' : 'Connecting…'}
+          </div>
         )}
-      </div>
-
-      {/* Degraded overlay — "blind spot" warning */}
-      {(source.status === 'degraded' || source.status === 'error') && (
-        <div style={{
-          position: 'absolute',
-          inset: 0,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          background: 'rgba(0,0,0,0.7)',
-          borderRadius: 'var(--radius-card)',
-        }}>
-          <div style={{ textAlign: 'center', color: 'var(--color-degraded)' }}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ width: 32, height: 32, margin: '0 auto 8px' }}>
-              <path d="M10 2L18 17H2L10 2Z" strokeLinejoin="round" />
-              <line x1="10" y1="8" x2="10" y2="12" strokeLinecap="round" />
-              <circle cx="10" cy="14.5" r="0.5" fill="currentColor" />
-            </svg>
-            <div style={{ fontSize: '0.75rem', fontWeight: 600 }}>
-              {source.status === 'error' ? 'Source Error' : 'Blind Spot'}
-            </div>
-            <div style={{ fontSize: '0.65rem', color: 'var(--color-text-muted)', marginTop: '4px' }}>
-              {source.name} stopped sending frames
-              {source.last_seen_age_s != null && ` ${source.last_seen_age_s.toFixed(0)} s ago`}
-            </div>
+        <div className="camera-overlay-top">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+            <span className="status-dot" style={{ background: statusColor }} />
+            <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{source.name}</span>
+          </div>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            {alarm && <span className="rec-dot" title="Recording evidence" />}
+            {source.adapter === 'simulated' ? <span className="badge badge-sim">SIM</span>
+              : source.status === 'online' ? <span className="badge badge-live">LIVE</span> : null}
           </div>
         </div>
+        {(source.status === 'degraded' || source.status === 'error') && (
+          <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 4, color: 'var(--color-degraded)' }}>
+            <b>{source.status === 'error' ? 'SOURCE ERROR' : 'BLIND SPOT'}</b>
+            <span className="dim" style={{ fontSize: '0.7rem' }}>No frames for {source.last_seen_age_s?.toFixed(0) ?? '?'}s</span>
+          </div>
+        )}
+        <div className="camera-overlay-bottom">
+          <span className="tabular-nums">{source.fps} fps in · {source.inference_fps} fps AI</span>
+          {source.skipped_frames > 0 && <span className="tabular-nums" title="Frames skipped by backpressure (latest-wins)">{source.skipped_frames} skipped</span>}
+        </div>
+      </div>
+      {showControls && (
+        <div style={{ display: 'flex', gap: 6, padding: 10, alignItems: 'center' }}>
+          <select className="text-input" style={{ padding: '5px 10px', fontSize: '0.74rem' }} value={source.zone_id ?? ''} onChange={e => assign(e.target.value)}>
+            {zone_configs.map(z => <option key={z.id} value={z.id}>{z.name}</option>)}
+          </select>
+          {!isAudio && <button className="btn btn-sm btn-ghost" onClick={() => setRaw(!raw)} title="Toggle AI overlay">{raw ? 'Raw' : 'AI view'}</button>}
+          <button className="btn btn-sm btn-ghost" onClick={remove} title="Remove source">✕</button>
+        </div>
       )}
+    </div>
+  );
+}
+
+function AudioBars({ level, active }: { level: number; active: boolean }) {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    const t = setInterval(() => setTick(x => x + 1), 120);
+    return () => clearInterval(t);
+  }, [active]);
+  return (
+    <div style={{ display: 'flex', gap: 3, alignItems: 'center', height: 48 }}>
+      {Array.from({ length: 18 }, (_, i) => {
+        const h = active ? 6 + Math.abs(Math.sin((tick + i * 1.7) * 0.6)) * (10 + level * 38) : 4;
+        return <div key={i} style={{ width: 4, height: h, borderRadius: 2, background: 'var(--color-series-audio)', transition: 'height 120ms' }} />;
+      })}
     </div>
   );
 }

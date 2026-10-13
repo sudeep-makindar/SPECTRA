@@ -1,213 +1,101 @@
 /**
- * Overview page — dashboard landing with aggregate stats.
- * Phase 0: skeleton layout with placeholder cards.
- * Phase 1+: live data from WebSocket.
+ * Command Center — the operator's single pane of glass.
  */
 
 import { useState } from 'react';
-import { AreaChart, Area, ResponsiveContainer, YAxis } from 'recharts';
-import { useSpectraSocket } from '../hooks/useSpectraSocket';
+import { useNavigate } from 'react-router-dom';
+import { useSpectra } from '../context/SpectraContext';
+import { RiskDial } from '../components/RiskDial';
+import { VenueMap } from '../components/VenueMap';
+import { ZoneCard } from '../components/ZoneCard';
+import { RiskTimeline } from '../components/RiskTimeline';
+import { EventFeed } from '../components/EventFeed';
+import { CopilotPanel } from '../components/CopilotPanel';
+import { ScenarioPanel } from '../components/ScenarioPanel';
 import { AddSourceDialog } from '../components/AddSourceDialog';
-import { IncidentReplayModal } from '../components/IncidentReplayModal';
+import { levelFromRisk } from '../lib/types';
 
 export function OverviewPage() {
-  const [isAddSourceOpen, setIsAddSourceOpen] = useState(false);
-  const [isReplayOpen, setIsReplayOpen] = useState(false);
-  const state = useSpectraSocket();
-
-  const activeSources = state.active_sources;
-  const totalSources = state.total_sources;
-  
-  // Calculate stroke dasharray for the circular progress (circumference ~ 326 for r=52)
-  const riskPercent = state.highest_risk;
-  
-  const getRiskColor = (risk: number) => {
-    if (risk >= 0.8) return 'var(--color-critical, #ef4444)';
-    if (risk >= 0.55) return 'var(--color-high, #f97316)';
-    if (risk >= 0.3) return 'var(--color-elevated, #eab308)';
-    return 'var(--color-sage)';
-  };
+  const s = useSpectra();
+  const navigate = useNavigate();
+  const [adding, setAdding] = useState(false);
+  const zones = s.zone_configs.map(c => s.zones[c.id]).filter(Boolean);
+  const worst = [...zones].sort((a, b) => b.risk_score - a.risk_score)[0];
+  const peakDensity = Math.max(0, ...zones.map(z => z.density_ppm2));
+  const peakLos = zones.reduce((acc, z) => (z.los > acc ? z.los : acc), 'A');
+  const openIncidents = s.incidents.filter(i => !i.ended_at && i.status !== 'resolved');
+  const e2e = s.metrics.latencies?.e2e;
+  const level = worst?.alert_level ?? levelFromRisk(s.highest_risk);
 
   return (
-    <div className="bento-grid" style={{ padding: '8px' }}>
-      {isAddSourceOpen && (
-        <AddSourceDialog 
-          onClose={() => setIsAddSourceOpen(false)} 
-          onSourceAdded={() => {}} 
-        />
-      )}
-      {isReplayOpen && (
-        <IncidentReplayModal onClose={() => setIsReplayOpen(false)} />
-      )}
-      
-      {/* Headline stat card (cream) — Total Headcount */}
-      <div className="card card-cream" style={{ gridColumn: 'span 1' }}>
-        <div className="card-label">Active Sources</div>
-        <div className="card-value tabular-nums">{activeSources} / {totalSources}</div>
-        <div className="card-tag">Cameras & nodes</div>
-        <div style={{ display: 'flex', gap: '8px', marginTop: '16px' }}>
-          <button className="pill-btn pill-btn-dark pill-btn-sm">Acknowledge</button>
-          <button className="pill-btn pill-btn-outlined pill-btn-sm">Escalate</button>
-        </div>
-      </div>
+    <div className="page">
+      {adding && <AddSourceDialog onClose={() => setAdding(false)} />}
 
-      {/* Risk gauge (dark) — Global risk */}
-      <div className="card card-dark" style={{ gridColumn: 'span 1' }}>
-        <div className="card-label">Global Risk</div>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '120px' }}>
-          <div style={{
-            width: '120px',
-            height: '120px',
-            borderRadius: '50%',
-            border: '8px solid var(--color-charcoal-lighter)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            position: 'relative',
-          }}>
-            <div style={{
-              position: 'absolute',
-              inset: '0',
-              borderRadius: '50%',
-              border: '8px solid transparent',
-              borderTopColor: getRiskColor(riskPercent),
-              borderRightColor: riskPercent > 0.25 ? getRiskColor(riskPercent) : 'transparent',
-              borderBottomColor: riskPercent > 0.5 ? getRiskColor(riskPercent) : 'transparent',
-              borderLeftColor: riskPercent > 0.75 ? getRiskColor(riskPercent) : 'transparent',
-              transform: 'rotate(-45deg)',
-              transition: 'all 0.3s ease-out'
-            }} />
-            <span className="pill-btn pill-btn-sm" style={{
-              background: 'var(--color-surface-overlay)',
-              color: 'var(--color-text-primary)',
-              border: 'none',
-              fontSize: '1rem',
-              fontWeight: 600,
-              zIndex: 1,
-            }}>
-              {(riskPercent * 100).toFixed(0)}%
-            </span>
+      <div className="grid-12">
+        {/* KPI row */}
+        <div className="card card-dark stat span-3" style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          <RiskDial risk={s.highest_risk} level={level} size={96} stroke={9} label="peak" />
+          <div>
+            <div className="card-label">Venue risk</div>
+            <span className={`level-pill level-${level}`}>{level}</span>
+            <div className="stat-sub" style={{ marginTop: 8 }}>{worst ? `Hottest: ${worst.name}` : 'No zones'}</div>
           </div>
         </div>
-        <div style={{ display: 'flex', gap: '16px', marginTop: '8px', justifyContent: 'center' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.7rem', color: 'var(--color-text-secondary)' }}>
-            <span className="status-dot" style={{ background: 'var(--color-sage)' }} />Vision
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.7rem', color: 'var(--color-text-secondary)' }}>
-            <span className="status-dot" style={{ background: 'var(--color-lavender)' }} />Audio
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.7rem', color: 'var(--color-text-secondary)' }}>
-            <span className="status-dot" style={{ background: 'var(--color-cream)' }} />Motion
-          </div>
+        <div className="card card-cream stat span-3">
+          <div className="card-label">People on site</div>
+          <div className="stat-value">{s.total_people}</div>
+          <div className="stat-sub">Peak density {peakDensity.toFixed(1)}/m² · worst LoS {peakLos}</div>
         </div>
-      </div>
+        <div className="card card-lavender stat span-3" style={{ cursor: 'pointer' }} onClick={() => navigate('/incidents')}>
+          <div className="card-label">Open incidents</div>
+          <div className="stat-value">{openIncidents.length}</div>
+          <div className="stat-sub">{s.incidents.length} this session · press <b>A</b> to acknowledge</div>
+          <div className="card-corner-icon"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 13L13 1M13 1H5M13 1v8" /></svg></div>
+        </div>
+        <div className="card card-sage stat span-3" style={{ cursor: 'pointer' }} onClick={() => setAdding(true)}>
+          <div className="card-label">Sensors online</div>
+          <div className="stat-value">{s.active_sources}<span style={{ fontSize: '1.1rem', opacity: 0.6 }}> / {s.total_sources}</span></div>
+          <div className="stat-sub">{e2e?.p95 != null ? `${Math.round(e2e.p95)} ms capture→alert p95` : 'Connect a camera, phone or mic'}</div>
+          <div className="card-corner-icon"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5"><line x1="7" y1="1" x2="7" y2="13" /><line x1="1" y1="7" x2="13" y2="7" /></svg></div>
+        </div>
 
-      {/* Quick actions column */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-        <div className="card card-sage" style={{ flex: 1, display: 'flex', alignItems: 'flex-end', cursor: 'pointer' }}>
-          <div className="card-title-display">ACKNOWLEDGE</div>
-          <div className="card-corner-icon">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 13L13 1M13 1H5M13 1v8" /></svg>
+        {/* Map + co-pilot */}
+        <div className="card card-dark span-7">
+          <div className="section-title">
+            <div className="card-label" style={{ marginBottom: 0 }}>Venue digital twin · live occupancy</div>
+            <div className="legend">
+              <span><i style={{ background: 'var(--color-risk-normal)' }} />Normal</span>
+              <span><i style={{ background: 'var(--color-risk-elevated)' }} />Elevated</span>
+              <span><i style={{ background: 'var(--color-risk-high)' }} />High</span>
+              <span><i style={{ background: 'var(--color-risk-critical)' }} />Critical</span>
+            </div>
           </div>
+          <VenueMap selected={s.focusZone} onSelect={id => s.setFocusZone(s.focusZone === id ? null : id)} />
         </div>
-        <div 
-          className="card card-lavender" 
-          style={{ flex: 1, display: 'flex', alignItems: 'flex-end', cursor: 'pointer' }}
-          onClick={() => setIsReplayOpen(true)}
-        >
-          <div className="card-title-display">INCIDENT REPLAY</div>
-          <div className="card-corner-icon">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 13L13 1M13 1H5M13 1v8" /></svg>
-          </div>
-        </div>
-        <div 
-          className="card card-cream" 
-          style={{ flex: 1, display: 'flex', alignItems: 'flex-end', cursor: 'pointer' }}
-          onClick={() => setIsAddSourceOpen(true)}
-        >
-          <div className="card-title-display">ADD SOURCE</div>
-          <div className="card-corner-icon">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5"><line x1="7" y1="1" x2="7" y2="13" /><line x1="1" y1="7" x2="13" y2="7" /></svg>
-          </div>
-        </div>
-      </div>
+        <div className="span-5"><CopilotPanel /></div>
 
-      {/* Density sparkline (sage) */}
-      <div className="card card-sage" style={{ gridColumn: 'span 1' }}>
-        <div className="card-label">Crowd Density</div>
-        <div style={{ height: '60px', display: 'flex', alignItems: 'flex-end', marginTop: '16px' }}>
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={state.history}>
-              <YAxis domain={[0, 1]} hide />
-              <Area 
-                type="monotone" 
-                dataKey="density" 
-                stroke="var(--color-sage)" 
-                fill="var(--color-sage)" 
-                fillOpacity={0.3} 
-                isAnimationActive={false}
-              />
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
-        <div className="card-value card-value-sm tabular-nums" style={{ marginTop: '8px' }}>
-          {state.history.length > 0 ? (state.history[state.history.length - 1].density * 100).toFixed(0) + '%' : '—'}
-        </div>
-        <div style={{ fontSize: '0.7rem', opacity: 0.6, marginTop: '2px' }}>Peak Global Density</div>
-      </div>
-
-      {/* Zone controls (dark) — Exchange card equivalent */}
-      <div className="card card-dark" style={{ gridColumn: 'span 1' }}>
-        <div className="card-label" style={{ marginBottom: '16px' }}>Zone Controls</div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          <div className="input-group">
-            <div className="input-chip">Zone</div>
-            <select style={{
-              flex: 1, background: 'none', border: 'none',
-              color: 'var(--color-text-primary)', fontFamily: 'var(--font-sans)',
-              fontSize: '0.875rem', outline: 'none', cursor: 'pointer',
-            }}>
-              {Object.values(state.zones).length > 0 ? (
-                Object.values(state.zones).map(z => (
-                  <option key={z.zone_id}>{z.name} ({(z.risk_score * 100).toFixed(0)}%)</option>
-                ))
-              ) : (
-                <option>No zones configured</option>
-              )}
-            </select>
+        {/* Zones */}
+        {zones.map(z => (
+          <div key={z.zone_id} className="span-4">
+            <ZoneCard zone={z} selected={s.focusZone === z.zone_id}
+              onClick={() => s.setFocusZone(s.focusZone === z.zone_id ? null : z.zone_id)} />
           </div>
-          <div className="input-group">
-            <div className="input-chip">Sensitivity</div>
-            <input type="number" placeholder="0.50" step="0.05" min="0" max="1" />
-          </div>
-          <button className="pill-btn pill-btn-light" style={{ width: '100%' }}>
-            Apply
-          </button>
-        </div>
-      </div>
+        ))}
 
-      {/* Audio level sparkline (lavender) */}
-      <div className="card card-lavender" style={{ gridColumn: 'span 1' }}>
-        <div className="card-label">Audio Threat Level</div>
-        <div style={{ height: '60px', display: 'flex', alignItems: 'flex-end', marginTop: '16px' }}>
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={state.history}>
-              <YAxis domain={[0, 1]} hide />
-              <Area 
-                type="stepAfter" 
-                dataKey="audio" 
-                stroke="var(--color-lavender)" 
-                fill="var(--color-lavender)" 
-                fillOpacity={0.3} 
-                isAnimationActive={false}
-              />
-            </AreaChart>
-          </ResponsiveContainer>
+        {/* Timeline + feed */}
+        <div className="card card-dark span-8">
+          <div className="section-title">
+            <div className="card-label" style={{ marginBottom: 0 }}>Fused risk · last 2 minutes</div>
+            <span className="dim" style={{ fontSize: '0.7rem' }}>Dashed lines = alert thresholds (hysteresis applies on the way down)</span>
+          </div>
+          <RiskTimeline zones={zones} height={230} />
         </div>
-        <div className="card-value card-value-sm tabular-nums" style={{ marginTop: '8px' }}>
-          {state.history.length > 0 ? (state.history[state.history.length - 1].audio * 100).toFixed(0) + '%' : '—'}
+        <div className="card card-dark span-4">
+          <div className="section-title"><div className="card-label" style={{ marginBottom: 0 }}>Event log</div></div>
+          <EventFeed height={262} />
         </div>
-        <div style={{ fontSize: '0.7rem', opacity: 0.6, marginTop: '2px' }}>Peak Audio Score</div>
+
+        <div className="span-12"><ScenarioPanel /></div>
       </div>
     </div>
   );

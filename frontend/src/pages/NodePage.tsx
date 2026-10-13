@@ -1,203 +1,201 @@
 /**
- * Browser Node Page
+ * Browser Node — turns a phone into a SPECTRA sensor *and* a steward pager.
  *
- * This page runs on a smartphone or remote laptop. It asks for camera/mic
- * permissions and streams data back to the Spectra server via WebSocket.
+ * Streams camera (JPEG, 5 fps) and microphone (PCM16) to the server over one
+ * WebSocket. All AI runs on the server; nothing is stored on the phone.
+ * It also polls its zone's alert level: when the zone goes HIGH/CRITICAL the
+ * screen turns red and the phone vibrates.
  */
 
 import { useEffect, useRef, useState } from 'react';
+import { SpectraWordmark } from '../components/Logo';
+
+type Status = 'idle' | 'connecting' | 'streaming' | 'error';
+
+function frame(header: object, payload: ArrayBuffer): ArrayBuffer {
+  const h = new TextEncoder().encode(JSON.stringify(header));
+  const out = new Uint8Array(4 + h.length + payload.byteLength);
+  new DataView(out.buffer).setUint32(0, h.length, false);
+  out.set(h, 4);
+  out.set(new Uint8Array(payload), 4 + h.length);
+  return out.buffer;
+}
 
 export function NodePage() {
-  const [token, setToken] = useState<string>('');
-  const [status, setStatus] = useState<'idle' | 'connecting' | 'streaming' | 'error'>('idle');
-  const [errorMsg, setErrorMsg] = useState('');
-  
+  const params = new URLSearchParams(window.location.search);
+  const [token, setToken] = useState(params.get('token') ?? '');
+  const name = params.get('name') ?? 'Spectra Node';
+  const [status, setStatus] = useState<Status>('idle');
+  const [err, setErr] = useState('');
+  const [withAudio, setWithAudio] = useState(true);
+  const [facing, setFacing] = useState<'environment' | 'user'>('environment');
+  const [stats, setStats] = useState({ frames: 0, audioKb: 0 });
+  const [zone, setZone] = useState<{ name: string | null; level: string | null }>({ name: null, level: null });
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const loopRef = useRef<number>();
+  const streamRef = useRef<MediaStream | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const timers = useRef<number[]>([]);
+  const lastLevel = useRef<string | null>(null);
 
-  // Check URL for token on mount
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const t = params.get('token');
-    if (t) setToken(t);
-  }, []);
+  const stop = (user = true) => {
+    timers.current.forEach(t => clearInterval(t));
+    timers.current = [];
+    wsRef.current?.close();
+    wsRef.current = null;
+    audioCtxRef.current?.close().catch(() => {});
+    audioCtxRef.current = null;
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    streamRef.current = null;
+    if (user) setStatus('idle');
+  };
+  useEffect(() => () => stop(false), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const startStreaming = async () => {
-    if (!token) {
-      setErrorMsg('Token is required');
-      return;
-    }
-
+  const start = async () => {
+    if (!token) { setErr('Missing token. Scan the QR code from the SPECTRA dashboard.'); return; }
+    setErr('');
+    setStatus('connecting');
     try {
-      setStatus('connecting');
-      
-      // 1. Get camera
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'environment' },
-        audio: false // Phase 1: video only for browser nodes to keep it simple, audio in Phase 2
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 960 }, height: { ideal: 540 }, facingMode: facing },
+        audio: withAudio ? { echoCancellation: false, noiseSuppression: false, autoGainControl: true } : false,
       });
+      streamRef.current = stream;
+      if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
 
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
-
-      // 2. Connect WebSocket
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const ws = new WebSocket(`${protocol}//${window.location.host}/ws/node?token=${token}`);
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${proto}//${window.location.host}/ws/node?token=${encodeURIComponent(token)}`);
       ws.binaryType = 'arraybuffer';
       wsRef.current = ws;
 
+      ws.onmessage = ev => {
+        try {
+          const m = JSON.parse(ev.data);
+          if (m.type === 'pong') {
+            setZone({ name: m.zone, level: m.level });
+            if ((m.level === 'high' || m.level === 'critical') && lastLevel.current !== m.level) navigator.vibrate?.([300, 120, 300, 120, 600]);
+            lastLevel.current = m.level;
+          }
+        } catch { /* ignore */ }
+      };
+      ws.onclose = ev => { if (wsRef.current === ws) { setStatus('error'); setErr(ev.code === 4001 ? 'Invalid or expired token.' : 'Connection closed.'); stop(false); } };
+
       ws.onopen = () => {
         setStatus('streaming');
-        // Start capture loop (5 fps)
-        const captureInterval = 1000 / 5;
-        
-        const captureFrame = () => {
-          if (ws.readyState === WebSocket.OPEN && videoRef.current && canvasRef.current) {
-            const ctx = canvasRef.current.getContext('2d');
-            if (ctx) {
-              canvasRef.current.width = videoRef.current.videoWidth;
-              canvasRef.current.height = videoRef.current.videoHeight;
-              ctx.drawImage(videoRef.current, 0, 0);
-              
-              // Convert to JPEG
-              canvasRef.current.toBlob((blob) => {
-                if (blob) {
-                  blob.arrayBuffer().then(buffer => {
-                    // Binary protocol: [4 bytes header len] [header JSON] [payload]
-                    const headerStr = JSON.stringify({ type: 'video', ts: Date.now() / 1000 });
-                    const headerBytes = new TextEncoder().encode(headerStr);
-                    
-                    const out = new Uint8Array(4 + headerBytes.length + buffer.byteLength);
-                    // Write length (BE)
-                    const view = new DataView(out.buffer);
-                    view.setUint32(0, headerBytes.length, false);
-                    
-                    out.set(headerBytes, 4);
-                    out.set(new Uint8Array(buffer), 4 + headerBytes.length);
-                    
-                    ws.send(out.buffer);
-                  });
-                }
-              }, 'image/jpeg', 0.6);
+        // Video: 5 fps JPEG
+        timers.current.push(window.setInterval(() => {
+          const v = videoRef.current, c = canvasRef.current;
+          if (!v || !c || ws.readyState !== WebSocket.OPEN || !v.videoWidth) return;
+          if (ws.bufferedAmount > 2_000_000) return; // network backpressure: skip frame
+          const scale = Math.min(1, 960 / v.videoWidth);
+          c.width = v.videoWidth * scale;
+          c.height = v.videoHeight * scale;
+          c.getContext('2d')?.drawImage(v, 0, 0, c.width, c.height);
+          c.toBlob(b => b?.arrayBuffer().then(buf => {
+            ws.send(frame({ type: 'video', ts: Date.now() / 1000 }, buf));
+            setStats(s => ({ ...s, frames: s.frames + 1 }));
+          }), 'image/jpeg', 0.7);
+        }, 200));
+        // Zone status ping
+        timers.current.push(window.setInterval(() => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: 'ping' })), 1500));
+
+        // Audio: PCM16 chunks of ~0.5 s at the device's native rate (server resamples)
+        if (withAudio && stream.getAudioTracks().length) {
+          const ctx = new AudioContext();
+          audioCtxRef.current = ctx;
+          const src = ctx.createMediaStreamSource(stream);
+          const proc = ctx.createScriptProcessor(4096, 1, 1);
+          let acc: Float32Array[] = [];
+          let n = 0;
+          proc.onaudioprocess = e => {
+            const d = e.inputBuffer.getChannelData(0);
+            acc.push(new Float32Array(d));
+            n += d.length;
+            if (n >= ctx.sampleRate * 0.5 && ws.readyState === WebSocket.OPEN) {
+              const pcm = new Int16Array(n);
+              let o = 0;
+              for (const a of acc) for (let i = 0; i < a.length; i++) pcm[o++] = Math.max(-1, Math.min(1, a[i])) * 0x7fff;
+              ws.send(frame({ type: 'audio', ts: Date.now() / 1000, sample_rate: ctx.sampleRate }, pcm.buffer));
+              setStats(s => ({ ...s, audioKb: s.audioKb + pcm.byteLength / 1024 }));
+              acc = [];
+              n = 0;
             }
-          }
-          loopRef.current = window.setTimeout(captureFrame, captureInterval);
-        };
-        
-        captureFrame();
+          };
+          src.connect(proc);
+          const sink = ctx.createGain();
+          sink.gain.value = 0;
+          proc.connect(sink).connect(ctx.destination);
+        }
       };
-
-      ws.onclose = () => {
-        setStatus('error');
-        setErrorMsg('Connection closed');
-        stopStreaming(false);
-      };
-
-      ws.onerror = () => {
-        setStatus('error');
-        setErrorMsg('WebSocket error');
-      };
-
-    } catch (err: any) {
+    } catch (e) {
       setStatus('error');
-      setErrorMsg(err.message || 'Failed to start camera');
+      const msg = (e as Error).message || 'Could not start camera';
+      setErr(window.isSecureContext ? msg : `${msg}. Camera needs HTTPS: open the https:// link from the QR code.`);
+      stop(false);
     }
   };
 
-  const stopStreaming = (userInitiated = true) => {
-    if (userInitiated) setStatus('idle');
-    
-    if (loopRef.current) clearTimeout(loopRef.current);
-    if (wsRef.current) wsRef.current.close();
-    
-    if (videoRef.current && videoRef.current.srcObject) {
-      const stream = videoRef.current.srcObject as MediaStream;
-      stream.getTracks().forEach(t => t.stop());
-      videoRef.current.srcObject = null;
-    }
-  };
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => stopStreaming(false);
-  }, []);
-
+  const alarm = zone.level === 'high' || zone.level === 'critical';
   return (
-    <div style={{ padding: '24px', maxWidth: '600px', margin: '0 auto' }}>
-      <h1 className="card-title-display" style={{ marginBottom: '8px' }}>Spectra Node</h1>
-      <p style={{ color: 'var(--color-text-secondary)', marginBottom: '24px' }}>
-        Stream camera data from this device to the Spectra server.
-      </p>
+    <div style={{ minHeight: '100vh', padding: 16, background: alarm ? (zone.level === 'critical' ? '#5a1416' : '#4a2a14') : '#0C0C0F', transition: 'background 300ms' }}>
+      <div style={{ maxWidth: 560, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ transform: 'scale(0.85)', transformOrigin: 'left' }}><SpectraWordmark /></div>
+          <span className="chip">{name}</span>
+        </div>
 
-      {status === 'idle' || status === 'error' ? (
-        <div className="card card-dark">
-          <div className="input-group">
-            <div className="input-chip">Token</div>
-            <input 
-              value={token} 
-              onChange={e => setToken(e.target.value)} 
-              placeholder="Paste token here"
-              style={{ fontFamily: 'var(--font-mono)' }}
-            />
+        {alarm && (
+          <div className="alert-banner" style={{ margin: 0 }}>
+            <span className="display">{zone.level}</span>
+            <div><b>{zone.name}</b><div style={{ fontSize: '0.8rem' }}>Check the control room for instructions.</div></div>
           </div>
-          
-          {errorMsg && (
-            <div style={{ color: 'var(--color-error)', margin: '16px 0', fontSize: '0.9rem' }}>
-              {errorMsg}
-              {errorMsg.includes('camera') && window.location.protocol !== 'https:' && (
-                <div style={{ marginTop: '8px', color: 'var(--color-text-muted)' }}>
-                  Note: Browsers block camera access on non-HTTPS connections (unless localhost).
-                </div>
-              )}
+        )}
+
+        <div className="camera-wrap" style={{ aspectRatio: '4 / 3' }}>
+          <video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+          {status !== 'streaming' && <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }} className="dim">Camera off</div>}
+          {status === 'streaming' && (
+            <div className="camera-overlay-top">
+              <span className="badge badge-live">LIVE</span>
+              <span style={{ fontSize: '0.72rem', color: '#fff' }}>{zone.name ? `Zone: ${zone.name}` : ''}</span>
             </div>
           )}
-
-          <button 
-            className="pill-btn pill-btn-light" 
-            style={{ width: '100%', marginTop: '16px' }}
-            onClick={startStreaming}
-            disabled={!token}
-          >
-            Start Streaming
-          </button>
         </div>
-      ) : (
-        <div className="card card-dark" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span className={`status-dot ${status === 'streaming' ? '' : 'status-dot-offline'}`} 
-                    style={{ background: status === 'streaming' ? 'var(--color-online)' : undefined }} />
-              <span style={{ fontWeight: 600 }}>
-                {status === 'connecting' ? 'Connecting...' : 'Live Streaming'}
-              </span>
+        <canvas ref={canvasRef} style={{ display: 'none' }} />
+
+        {status === 'streaming' ? (
+          <>
+            <div className="card card-dark" style={{ padding: 14, display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
+              <span>📷 {stats.frames} frames</span>
+              <span>🎙 {withAudio ? `${Math.round(stats.audioKb)} KB` : 'off'}</span>
+              <span className={`level-pill level-${zone.level ?? 'normal'}`}>{zone.level ?? '—'}</span>
+            </div>
+            <button className="pill-btn pill-btn-outlined" style={{ color: 'var(--color-cream)' }} onClick={() => stop()}>Stop streaming</button>
+          </>
+        ) : (
+          <div className="card card-dark" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {!params.get('token') && (
+              <div className="input-group"><div className="input-chip">Token</div><input value={token} onChange={e => setToken(e.target.value)} placeholder="Paste token" /></div>
+            )}
+            <label style={{ display: 'flex', gap: 8, fontSize: '0.85rem', alignItems: 'center' }}>
+              <input type="checkbox" checked={withAudio} onChange={e => setWithAudio(e.target.checked)} style={{ accentColor: '#9D8DF7' }} /> Stream microphone (scream / keyword detection)
+            </label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className={`btn ${facing === 'environment' ? 'btn-primary' : ''}`} onClick={() => setFacing('environment')}>Rear camera</button>
+              <button className={`btn ${facing === 'user' ? 'btn-primary' : ''}`} onClick={() => setFacing('user')}>Front camera</button>
+            </div>
+            {err && <div style={{ color: 'var(--color-error)', fontSize: '0.82rem' }}>{err}</div>}
+            <button className="pill-btn pill-btn-light" disabled={status === 'connecting'} onClick={start}>
+              {status === 'connecting' ? 'Connecting…' : 'Start streaming'}
+            </button>
+            <div className="dim" style={{ fontSize: '0.7rem', lineHeight: 1.5 }}>
+              Video and audio go only to the SPECTRA server on your local network. Nothing is stored on this phone. Keep the screen on while streaming.
             </div>
           </div>
-          
-          <div style={{ position: 'relative', width: '100%', aspectRatio: '4/3', background: '#000', borderRadius: 'var(--radius-card)', overflow: 'hidden' }}>
-            <video 
-              ref={videoRef} 
-              autoPlay 
-              playsInline 
-              muted 
-              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-            />
-          </div>
-          
-          <canvas ref={canvasRef} style={{ display: 'none' }} />
-
-          <button 
-            className="pill-btn pill-btn-outlined" 
-            style={{ width: '100%' }}
-            onClick={() => stopStreaming()}
-          >
-            Stop Streaming
-          </button>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }
