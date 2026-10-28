@@ -40,5 +40,5 @@ llm:
   model: ""
   api_key: ""
 
-sim_mode: false
+sim_mode: true
 debug: false

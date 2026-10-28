@@ -88,7 +88,11 @@ class MetricsCollector:
                     cls._instance = cls()
         return cls._instance
 
-    def record_latency(self, source_id: str, stage: str, duration_ms: float) -> None:
+    def record_latency(self, source_id: str, stage: str = "inference", duration_ms: float = 0.0) -> None:
+        if isinstance(stage, (int, float)):
+            duration_ms = float(stage) * 1000.0 if stage < 1.0 else float(stage)
+            stage = source_id
+            source_id = "default"
         sample = LatencySample(
             source_id=source_id, stage=stage, ts=time.time(), duration_ms=duration_ms
         )

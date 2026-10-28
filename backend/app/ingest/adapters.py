@@ -228,6 +228,66 @@ class SimulatedSource(BaseSource):
         return {"simulated": True, "target_fps": self.target_fps}
 
 
+# ── SimulatedAudioSource ───────────────────────────────────────────────────
+
+class SimulatedAudioSource(BaseSource):
+    """Generates scripted acoustic scenarios for development and testing.
+
+    Produces synthetic 1-second chunks cycling through calm -> building -> panic -> resolving.
+    Clearly labeled 'SIM' with metadata.
+    """
+
+    SCENARIOS = {
+        "calm": {"duration_s": 15, "score": 0.05, "label": "Ambient Crowd Murmur", "class": "crowd"},
+        "building": {"duration_s": 8, "score": 0.45, "label": "Elevated Shouting", "class": "shouting"},
+        "panic": {"duration_s": 5, "score": 0.88, "label": "Scream / Panic Event", "class": "screaming"},
+        "resolving": {"duration_s": 10, "score": 0.25, "label": "Post-Incident Chatter", "class": "speech"},
+    }
+
+    def __init__(self, source_id: str, name: str, sample_rate: int = 16000):
+        super().__init__(source_id, name, SourceKind.AUDIO, {"simulated": True})
+        self.sample_rate = sample_rate
+
+    async def start(self, enqueue: Callable[[SourcePacket], Awaitable[None]]) -> None:
+        self.is_running = True
+        scenario_order = ["calm", "building", "panic", "resolving"]
+        logger.info("SimulatedAudioSource %s: starting (SIM mode)", self.name)
+
+        while self.is_running:
+            for phase_name in scenario_order:
+                if not self.is_running:
+                    break
+                phase = self.SCENARIOS[phase_name]
+                t_start = time.time()
+
+                while self.is_running and (time.time() - t_start) < phase["duration_s"]:
+                    t0 = time.time()
+                    audio_payload = (np.random.randn(self.sample_rate).astype(np.float32) * float(phase["score"] * 0.2))
+
+                    packet = self._make_packet(
+                        payload=audio_payload,
+                        ts_capture=time.time(),
+                        metadata={
+                            "source_type": "simulated",
+                            "phase": phase_name,
+                            "sim_density": phase["score"],
+                            "threat_label": phase["label"],
+                            "top_class": phase["class"],
+                        },
+                    )
+                    await enqueue(packet)
+                    elapsed = time.time() - t0
+                    await asyncio.sleep(max(0.0, 1.0 - elapsed))
+
+        logger.info("SimulatedAudioSource %s: stopped", self.name)
+
+    async def stop(self) -> None:
+        self.is_running = False
+
+    def status(self) -> dict:
+        return {"simulated": True, "sample_rate": self.sample_rate}
+
+
 # ── LocalWebcamSource ───────────────────────────────────────────────────
 
 class LocalWebcamSource(BaseSource):
@@ -245,7 +305,7 @@ class LocalWebcamSource(BaseSource):
         config = load_config()
 
         logger.info("LocalWebcamSource %s: opening device %d", self.name, self.device_index)
-        self._cap = cv2.VideoCapture(self.device_index)
+        self._cap = await asyncio.to_thread(cv2.VideoCapture, self.device_index)
 
         if not self._cap.isOpened():
             logger.error("LocalWebcamSource %s: cannot open device %d", self.name, self.device_index)
@@ -310,7 +370,7 @@ class RtspHttpVideoSource(BaseSource):
 
         while self.is_running:
             logger.info("RtspHttpVideoSource %s: connecting to %s", self.name, self.url)
-            self._cap = cv2.VideoCapture(self.url)
+            self._cap = await asyncio.to_thread(cv2.VideoCapture, self.url)
 
             if not self._cap.isOpened():
                 self._reconnect_count += 1

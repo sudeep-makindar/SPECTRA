@@ -134,7 +134,7 @@ class PerceptionManager:
             )
             
         latency = time.time() - t0
-        metrics.record_latency("vision", latency)
+        metrics.record_latency(packet.source_id, "vision", latency * 1000)
 
         # Emit Vision sample
         v_sample = RiskSample(
@@ -189,7 +189,7 @@ class PerceptionManager:
             a_result = await asyncio.to_thread(audio_model.predict, packet.payload)
             
         latency = time.time() - t0
-        metrics.record_latency("audio", latency)
+        metrics.record_latency(packet.source_id, "audio", latency * 1000)
 
         a_sample = RiskSample(
             source_id=packet.source_id,

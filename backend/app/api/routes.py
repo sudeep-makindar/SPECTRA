@@ -210,17 +210,128 @@ async def stop_source(source_id: str) -> dict:
     return {"status": "stopped", "source_id": source_id}
 
 
-# ── Zone CRUD (stub for Phase 3) ──────────────────────────────────────
+# ── Zone CRUD ──────────────────────────────────────────────────────────
+
+class CreateZoneRequest(BaseModel):
+    name: str
+    capacity: Optional[int] = 50
+    source_ids: Optional[list[str]] = None
+    thresholds: Optional[dict] = None
+
 
 @router.get("/zones", tags=["zones"])
 async def list_zones() -> list[dict]:
-    """List all zones. Implemented in Phase 3."""
-    return []
+    """List all configured zones with assigned sources and live states."""
+    import uuid
+    from sqlmodel import select
+    from app.db.session import get_session
+    from app.db.models import Zone as DbZone
+    from app.fusion.engine import FusionEngine
+
+    registry = SourceRegistry.instance()
+    fusion = FusionEngine.instance()
+
+    with get_session() as session:
+        zones = session.exec(select(DbZone)).all()
+        # If DB has no zones yet, seed a default zone so monitoring works immediately
+        if not zones:
+            default_zone = DbZone(id="zone-1", name="Main Gate & Plaza", capacity=50)
+            session.add(default_zone)
+            session.commit()
+            session.refresh(default_zone)
+            zones = [default_zone]
+
+        result = []
+        for z in zones:
+            assigned = [
+                s.to_dict() for s in registry.all() if s.zone_id == z.id
+            ]
+            live_state = fusion.get_or_create_zone(z.id, z.name)
+            result.append({
+                "id": z.id,
+                "name": z.name,
+                "capacity": z.capacity or 50,
+                "sources": assigned,
+                "source_count": len(assigned),
+                "risk_score": round(live_state.risk_score, 3),
+                "alert_level": live_state.alert_level,
+                "vision_score": round(live_state.vision.score, 3),
+                "motion_score": round(live_state.motion.score, 3),
+                "audio_score": round(live_state.audio.score, 3),
+                "created_at": z.created_at,
+            })
+        return result
 
 
-# ── Incident list (stub for Phase 4) ──────────────────────────────────
+@router.post("/zones", tags=["zones"])
+async def create_zone(req: CreateZoneRequest) -> dict:
+    """Create a new zone and optionally bind sources to it."""
+    import uuid
+    from app.db.session import get_session
+    from app.db.models import Zone as DbZone
+    from app.fusion.engine import FusionEngine
 
-@router.get("/incidents", tags=["incidents"])
-async def list_incidents() -> list[dict]:
-    """List all incidents. Implemented in Phase 4."""
-    return []
+    if not req.name or not req.name.strip():
+        raise HTTPException(status_code=400, detail="Zone name cannot be empty")
+
+    registry = SourceRegistry.instance()
+    fusion = FusionEngine.instance()
+    zone_id = f"zone-{uuid.uuid4().hex[:6]}"
+
+    with get_session() as session:
+        db_zone = DbZone(
+            id=zone_id,
+            name=req.name.strip(),
+            capacity=req.capacity or 50,
+        )
+        session.add(db_zone)
+        session.commit()
+        session.refresh(db_zone)
+
+    live_state = fusion.get_or_create_zone(zone_id, db_zone.name)
+
+    assigned = []
+    if req.source_ids:
+        for sid in req.source_ids:
+            entry = registry.get(sid)
+            if entry:
+                entry.zone_id = zone_id
+                assigned.append(entry.to_dict())
+
+    return {
+        "id": db_zone.id,
+        "name": db_zone.name,
+        "capacity": db_zone.capacity,
+        "sources": assigned,
+        "source_count": len(assigned),
+        "risk_score": round(live_state.risk_score, 3),
+        "alert_level": live_state.alert_level,
+        "created_at": db_zone.created_at,
+    }
+
+
+@router.delete("/zones/{zone_id}", tags=["zones"])
+async def delete_zone(zone_id: str) -> dict:
+    """Delete a zone and unassign its sources."""
+    from app.db.session import get_session
+    from app.db.models import Zone as DbZone
+    from app.fusion.engine import FusionEngine
+
+    registry = SourceRegistry.instance()
+    fusion = FusionEngine.instance()
+
+    with get_session() as session:
+        db_zone = session.get(DbZone, zone_id)
+        if not db_zone:
+            raise HTTPException(status_code=404, detail="Zone not found")
+        session.delete(db_zone)
+        session.commit()
+
+    for s in registry.all():
+        if s.zone_id == zone_id:
+            s.zone_id = None
+
+    if zone_id in fusion._zones:
+        del fusion._zones[zone_id]
+
+    return {"status": "deleted", "zone_id": zone_id}

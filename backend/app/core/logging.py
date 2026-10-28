@@ -22,6 +22,12 @@ def setup_logging(level: str = "INFO", json_format: bool = False) -> None:
 
     root_logger.setLevel(getattr(logging, level.upper(), logging.INFO))
 
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
     handler = logging.StreamHandler(sys.stdout)
 
     if json_format:

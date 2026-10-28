@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 
 from app.core.config import load_config, INCIDENTS_DIR
-from app.ingest.base import SourcePacket
+from app.ingest.base import SourcePacket, SourceKind
 
 logger = logging.getLogger("spectra.evidence")
 
@@ -55,7 +55,7 @@ class EvidenceManager:
 
     def add_frame(self, packet: SourcePacket) -> None:
         """Add a frame to the rolling buffer for its source."""
-        if packet.payload is None or not isinstance(packet.payload, np.ndarray):
+        if packet.kind != SourceKind.VIDEO or packet.payload is None or not isinstance(packet.payload, np.ndarray) or packet.payload.ndim < 2:
             return
             
         source_id = packet.source_id

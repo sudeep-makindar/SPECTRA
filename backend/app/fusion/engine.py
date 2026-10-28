@@ -107,90 +107,85 @@ class FusionEngine:
                 logger.error("Error processing sample in fusion engine: %s", e, exc_info=True)
 
     def _process_sample(self, sample: RiskSample) -> None:
-        # In a real system, we'd lookup which zone this source_id belongs to.
-        # For now, put everything in the default Global Zone.
-        zone = self._zones.get("default")
-        if not zone:
-            return
-            
+        from app.ingest.registry import SourceRegistry
+        entry = SourceRegistry.instance().get(sample.source_id)
+        zones_to_update = []
+        if "default" in self._zones:
+            zones_to_update.append(self._zones["default"])
+        if entry and entry.zone_id and entry.zone_id in self._zones:
+            z_entry = self._zones[entry.zone_id]
+            if z_entry not in zones_to_update:
+                zones_to_update.append(z_entry)
+
         now = time.time()
         c = self._config.fusion
-        
-        # 1. Update Modality State with EMA Smoothing
-        if sample.modality == "vision":
-            # smooth the score so a single bad frame doesn't spike it
-            zone.vision.score = (c.ema_alpha * sample.score) + ((1 - c.ema_alpha) * zone.vision.score)
-            zone.vision.last_updated = now
-            
-            # Extract advanced UI context
-            count = sample.metadata.get("count", 0)
-            chaos = sample.metadata.get("chaos_index", 0.0)
-            fallen = sample.metadata.get("fallen_count", 0)
-            
-            ctx = f"{count} pax"
-            if fallen > 0:
-                ctx += f" | {fallen} FALLEN"
-            elif chaos > 0.6:
-                ctx += " | CHAOS"
-            zone.vision.context = ctx
 
-        elif sample.modality == "motion":
-            zone.motion.score = (c.ema_alpha * sample.score) + ((1 - c.ema_alpha) * zone.motion.score)
-            zone.motion.last_updated = now
-            zone.motion.context = f"Mag: {sample.metadata.get('magnitude', 0.0):.1f}"
+        for zone in zones_to_update:
+            # 1. Update Modality State with EMA Smoothing
+            if sample.modality == "vision":
+                zone.vision.score = (c.ema_alpha * sample.score) + ((1 - c.ema_alpha) * zone.vision.score)
+                zone.vision.last_updated = now
+                count = sample.metadata.get("count", 0)
+                chaos = sample.metadata.get("chaos_index", 0.0)
+                fallen = sample.metadata.get("fallen_count", 0)
+                ctx = f"{count} pax"
+                if fallen > 0:
+                    ctx += f" | {fallen} FALLEN"
+                elif chaos > 0.6:
+                    ctx += " | CHAOS"
+                zone.vision.context = ctx
 
-        elif sample.modality == "audio":
-            # Audio spikes are critical, less EMA smoothing, more instant reaction
-            zone.audio.score = max(sample.score, zone.audio.score * 0.8) # decay slowly
-            zone.audio.last_updated = now
-            
-            label = sample.metadata.get("threat_label")
-            text = sample.metadata.get("detected_text", "")
-            if text:
-                zone.audio.context = f"[{text}]"
-            elif label:
-                zone.audio.context = label
+            elif sample.modality == "motion":
+                zone.motion.score = (c.ema_alpha * sample.score) + ((1 - c.ema_alpha) * zone.motion.score)
+                zone.motion.last_updated = now
+                zone.motion.context = f"Mag: {sample.metadata.get('magnitude', 0.0):.1f}"
+
+            elif sample.modality == "audio":
+                zone.audio.score = max(sample.score, zone.audio.score * 0.8)
+                zone.audio.last_updated = now
+                label = sample.metadata.get("threat_label")
+                text = sample.metadata.get("detected_text", "")
+                if text:
+                    zone.audio.context = f"[{text}]"
+                elif label:
+                    zone.audio.context = label
+                else:
+                    zone.audio.context = sample.metadata.get("top_class", "Normal")
+
+            # 2. Re-calculate Zone Fusion Score
+            if zone.vision.age > c.staleness_timeout_s:
+                zone.vision.score = 0.0
+            if zone.motion.age > c.staleness_timeout_s:
+                zone.motion.score = 0.0
+            if zone.audio.age > c.staleness_timeout_s:
+                zone.audio.score = 0.0
+
+            v_weighted = zone.vision.score * c.weight_density
+            m_weighted = zone.motion.score * c.weight_motion
+            a_weighted = zone.audio.score * c.weight_audio
+
+            active_modalities = 0
+            if zone.vision.score > 0.5: active_modalities += 1
+            if zone.motion.score > 0.5: active_modalities += 1
+            if zone.audio.score > 0.5: active_modalities += 1
+
+            base_score = v_weighted + m_weighted + a_weighted
+
+            if active_modalities >= 2:
+                fused_score = base_score * c.cross_modal_multiplier
+            elif active_modalities == 1:
+                fused_score = base_score * c.single_modal_dampen
             else:
-                zone.audio.context = sample.metadata.get("top_class", "Normal")
+                fused_score = base_score
 
-        # 2. Re-calculate Zone Fusion Score
-        # Zero out stale modalities
-        if zone.vision.age > c.staleness_timeout_s:
-            zone.vision.score = 0.0
-        if zone.motion.age > c.staleness_timeout_s:
-            zone.motion.score = 0.0
-        if zone.audio.age > c.staleness_timeout_s:
-            zone.audio.score = 0.0
-            
-        v_weighted = zone.vision.score * c.weight_density
-        m_weighted = zone.motion.score * c.weight_motion
-        a_weighted = zone.audio.score * c.weight_audio
-        
-        # How many modalities are reporting high risk? (> 0.5)
-        active_modalities = 0
-        if zone.vision.score > 0.5: active_modalities += 1
-        if zone.motion.score > 0.5: active_modalities += 1
-        if zone.audio.score > 0.5: active_modalities += 1
-        
-        base_score = v_weighted + m_weighted + a_weighted
-        
-        # Cross-modal amplification
-        if active_modalities >= 2:
-            fused_score = base_score * c.cross_modal_multiplier
-        elif active_modalities == 1:
-            fused_score = base_score * c.single_modal_dampen
-        else:
-            fused_score = base_score
-            
-        # Hard overrides (e.g., Gunshot detected -> Instant Critical)
-        if zone.audio.score > c.gunshot_hard_trigger:
-            fused_score = max(fused_score, 0.95)
-            
-        zone.risk_score = min(fused_score, 1.0)
-        zone.last_updated = now
-        
-        # 3. State Machine Transitions (Hysteresis)
-        self._evaluate_state_machine(zone, c)
+            if zone.audio.score > c.gunshot_hard_trigger:
+                fused_score = max(fused_score, 0.95)
+
+            zone.risk_score = min(fused_score, 1.0)
+            zone.last_updated = now
+
+            # 3. State Machine Transitions (Hysteresis)
+            self._evaluate_state_machine(zone, c)
 
     def _evaluate_state_machine(self, zone: ZoneState, c) -> None:
         """

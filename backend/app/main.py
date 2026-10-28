@@ -55,27 +55,6 @@ async def lifespan(app: FastAPI):
     registry = SourceRegistry.instance()
     await registry.start_staleness_monitor()
 
-    # If sim_mode, auto-create simulated sources for demo
-    if config.sim_mode:
-        logger.info("SIM MODE: creating simulated sources for demo")
-        from app.ingest.adapters import SimulatedSource
-
-        for i, name in enumerate(["Gate Cam 1", "Gate Cam 2", "Stage Cam"]):
-            adapter = SimulatedSource(
-                source_id=f"sim-{i+1}",
-                name=name,
-                target_fps=5,
-            )
-            from app.ingest.base import SourceKind
-            entry = registry.register(
-                name=name,
-                kind=SourceKind.VIDEO,
-                adapter_type="simulated",
-                source_id=f"sim-{i+1}",
-                adapter=adapter,
-            )
-            await registry.start_source(f"sim-{i+1}")
-
     # Start Evidence Manager (Phase 4)
     evidence = EvidenceManager.instance()
     await evidence.start()
@@ -84,10 +63,60 @@ async def lifespan(app: FastAPI):
     fusion = FusionEngine.instance()
     await fusion.start()
 
+    # Preload DB zones into FusionEngine
+    try:
+        from sqlmodel import select
+        from app.db.session import get_session
+        from app.db.models import Zone as DbZone
+        with get_session() as session:
+            db_zones = session.exec(select(DbZone)).all()
+            for db_z in db_zones:
+                fusion.get_or_create_zone(db_z.id, db_z.name)
+            logger.info("Preloaded %d surveillance zones into Fusion Engine", len(db_zones))
+    except Exception as e:
+        logger.warning("Could not preload DB zones: %s", e)
+
     # Start Perception Manager
     perception = PerceptionManager.instance()
     perception.on_sample = fusion.on_sample_received
     await perception.start()
+
+    # If sim_mode, auto-create simulated video and audio sources for demo
+    if config.sim_mode:
+        logger.info("SIM MODE: creating simulated multimodal sources for demo")
+        from app.ingest.adapters import SimulatedSource, SimulatedAudioSource
+        from app.ingest.base import SourceKind
+
+        for i, name in enumerate(["Gate Cam 1", "Gate Cam 2", "Stage Cam"]):
+            adapter = SimulatedSource(
+                source_id=f"sim-{i+1}",
+                name=name,
+                target_fps=5,
+            )
+            registry.register(
+                name=name,
+                kind=SourceKind.VIDEO,
+                adapter_type="simulated",
+                source_id=f"sim-{i+1}",
+                adapter=adapter,
+                zone_id="zone-1",
+            )
+            await registry.start_source(f"sim-{i+1}")
+
+        # Add simulated audio source to cover Audio modality
+        audio_adapter = SimulatedAudioSource(
+            source_id="sim-audio-1",
+            name="Main Gate Acoustic Array",
+        )
+        registry.register(
+            name="Main Gate Acoustic Array",
+            kind=SourceKind.AUDIO,
+            adapter_type="simulated",
+            source_id="sim-audio-1",
+            adapter=audio_adapter,
+            zone_id="zone-1",
+        )
+        await registry.start_source("sim-audio-1")
 
     logger.info("Startup complete — ready to accept connections")
 
