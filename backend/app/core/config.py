@@ -38,6 +38,9 @@ class ServerConfig(BaseModel):
 
 class VideoConfig(BaseModel):
     analysis_fps: int = 5
+    # yolo26n.pt is ~3× faster than yolo26s.pt and a little less accurate on
+    # small, distant people. Use it if the load test shows a slow machine.
+    yolo_model: str = "yolo26s.pt"
     preview_width: int = 640
     preview_quality: int = 70  # JPEG quality for preview streams
     flow_width: int = 320  # Downscale target for optical flow
@@ -154,18 +157,22 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 def _apply_env_overrides(data: dict) -> dict:
     """Apply SPECTRA_* environment variable overrides.
 
-    Convention: SPECTRA_SERVER_PORT=9000 → data["server"]["port"] = 9000
+    Convention: SPECTRA_SERVER_PORT=9000 → data["server"]["port"] = 9000.
+    The first word is the section; the rest is the key, underscores and all
+    (SPECTRA_VIDEO_YOLO_MODEL → video.yolo_model, SPECTRA_SIM_MODE → sim_mode).
     """
     prefix = "SPECTRA_"
+    sections = set(AppConfig.model_fields) - {"sim_mode", "debug"}
     for key, val in os.environ.items():
         if not key.startswith(prefix):
             continue
-        parts = key[len(prefix):].lower().split("_")
-        target = data
-        for part in parts[:-1]:
-            target = target.setdefault(part, {})
+        name = key[len(prefix):].lower()
+        section, _, rest = name.partition("_")
+        if section in sections and rest:
+            target, final_key = data.setdefault(section, {}), rest
+        else:
+            target, final_key = data, name
         # Try to parse as int/float/bool
-        final_key = parts[-1]
         if val.lower() in ("true", "false"):
             target[final_key] = val.lower() == "true"
         else:

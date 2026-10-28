@@ -21,7 +21,7 @@ from typing import Callable, Awaitable
 import numpy as np
 
 from app.core.config import load_config
-from app.core.device import get_device
+from app.core.device import get_device, run_on_gpu
 from app.core.metrics import MetricsCollector
 from app.evidence.manager import EvidenceManager
 from app.ingest.base import SourcePacket, SourceKind
@@ -29,6 +29,16 @@ from app.models.registry import ModelRegistry
 from app.perception.schema import RiskSample
 
 logger = logging.getLogger("spectra.perception.workers")
+
+
+def _mel_columns(audio: np.ndarray, n_mels: int = 32, cols: int = 50) -> list[list[float]]:
+    """A small log-mel spectrogram of one audio window, scaled 0–1, as time columns."""
+    import librosa
+    hop = max(1, len(audio) // cols)
+    mel = librosa.feature.melspectrogram(y=audio.astype(np.float32), sr=16000, n_fft=512, hop_length=hop, n_mels=n_mels)
+    db = librosa.power_to_db(mel, ref=1.0)
+    scaled = np.clip((db + 80.0) / 70.0, 0.0, 1.0)  # about -80 dB (silence) … -10 dB (loud)
+    return [[round(float(v), 2) for v in col] for col in scaled.T[:cols]]
 
 
 class PerceptionManager:
@@ -46,6 +56,9 @@ class PerceptionManager:
         self._audio_busy: set[str] = set()
         self._audio_buf: dict[str, np.ndarray] = {}
         self.model_status: dict[str, str] = {}
+        # Latest model outputs per source, for the camera focus view (/ws/inspect)
+        self.insights: dict[str, dict] = {}
+        self.audio_insights: dict[str, dict] = {}
 
     @classmethod
     def instance(cls) -> "PerceptionManager":
@@ -72,7 +85,8 @@ class PerceptionManager:
         from app.models.vision import YoloModel
         from app.models.motion import MotionModel
         from app.models.audio import AstAudioModel
-        await asyncio.to_thread(_load, "yolo", YoloModel, self.device)
+        yolo_name = self._config.video.yolo_model
+        await asyncio.to_thread(_load, "yolo", lambda: YoloModel(yolo_name), self.device)
         await asyncio.to_thread(_load, "motion", MotionModel, "cpu")
         await asyncio.to_thread(_load, "audio", AstAudioModel, self.device)
 
@@ -142,14 +156,27 @@ class PerceptionManager:
             if yolo is None or motion is None:
                 return  # models still loading
 
+            took: dict[str, float] = {}
+
             async def timed(stage, fn, arg):
                 t0 = time.time()
                 out = await asyncio.to_thread(fn, arg)
-                metrics.record_latency(sid, stage, (time.time() - t0) * 1000)
+                took[stage] = (time.time() - t0) * 1000
+                metrics.record_latency(sid, stage, took[stage])
                 return out
 
             inp = {"source_id": sid, "frame": packet.payload}
-            v, m = await asyncio.gather(timed("vision", yolo.predict, inp), timed("motion", motion.predict, inp))
+            yolo_predict = lambda x: run_on_gpu(yolo.predict, x)  # noqa: E731
+            v, m = await asyncio.gather(timed("vision", yolo_predict, inp), timed("motion", motion.predict, inp))
+            h, w = packet.payload.shape[:2]
+            self.insights[sid] = {
+                "ts": time.time(),
+                "vision": {"model": f"{yolo.label} + ByteTrack", "ms": round(took["vision"], 1), "frame_w": w, "frame_h": h,
+                           "detections": [{"id": d["id"], "conf": d["conf"], "box": d["box"]} for d in v["detections"]]},
+                "motion": {"ms": round(took["motion"], 1), "ratio": round(m.get("ratio", 0.0), 2),
+                           "baseline": m.get("baseline", 0.0), "magnitude": m.get("raw_magnitude", 0.0),
+                           "direction_deg": m.get("direction_deg"), "calibrating": bool(m.get("calibrating"))},
+            }
         metrics.source(sid).record_inference()
         if v.get("detections"):
             EvidenceManager.instance().add_detections(sid, packet.ts_capture, packet.payload.shape[1],
@@ -163,8 +190,10 @@ class PerceptionManager:
             from app.zones.manager import ZoneManager
             zcfg = ZoneManager.instance().get(entry.zone_id or "") if entry.zone_id else None
             label = (zcfg.name if zcfg else "UNASSIGNED").upper()
+            yolo = ModelRegistry.instance().get("yolo")
             jpeg = await asyncio.to_thread(annotate_frame, packet.payload, v, m, label,
-                                           self._config.video.preview_width, self._config.video.preview_quality)
+                                           self._config.video.preview_width, self._config.video.preview_quality,
+                                           getattr(yolo, "label", "YOLO"))
             if jpeg:
                 entry.annotated_jpeg = jpeg
                 entry.annotated_ts = time.time()
@@ -216,12 +245,20 @@ class PerceptionManager:
                 return
             metrics = MetricsCollector.instance()
             t0 = time.time()
-            a = await asyncio.to_thread(model.predict, audio)
+            a = await asyncio.to_thread(run_on_gpu, model.predict, audio)
             total_ms = (time.time() - t0) * 1000
             if a.get("whisper_ms"):
                 metrics.record_latency(sid, "whisper", a["whisper_ms"])
             metrics.record_latency(sid, "audio", total_ms - (a.get("whisper_ms") or 0))
             metrics.source(sid).record_inference()
+            self.audio_insights[sid] = {
+                "ts": time.time(), "source_id": sid,
+                "model": f"AST (AudioSet) + Whisper {self._config.audio.whisper_model}",
+                "ms": round(total_ms - (a.get("whisper_ms") or 0), 1), "whisper_ms": a.get("whisper_ms"),
+                "classes": a.get("top5", []), "transcript": a.get("detected_text", ""), "keyword": a.get("keyword"),
+                "language": a.get("language"), "rms": a.get("rms", 0.0), "hard_trigger": bool(a.get("hard_trigger")),
+                "mel": await asyncio.to_thread(_mel_columns, audio),
+            }
             if self.on_sample:
                 await self.on_sample(RiskSample(
                     source_id=sid, modality="audio", score=a["audio_score"], ts_capture=ts_capture,

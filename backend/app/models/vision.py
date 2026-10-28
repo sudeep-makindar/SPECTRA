@@ -29,12 +29,13 @@ logger = logging.getLogger("spectra.models.vision")
 
 GRID_ROWS, GRID_COLS = 6, 8
 
-# BGR colours from the Stoken palette
-LAVENDER = (247, 141, 157)
-SAGE = (118, 154, 110)
-CREAM = (238, 242, 242)
-CRIMSON = (92, 92, 255)
-AMBER = (32, 176, 255)
+# BGR colours matching the dashboard: white for normal marks, amber and red
+# only for things that mean risk (fast movement, a person on the ground).
+WHITE = (240, 243, 244)
+INK = (14, 13, 13)
+GREY = (150, 152, 155)
+AMBER = (75, 176, 232)
+RED = (67, 75, 239)
 
 
 class YoloModel(BaseModel):
@@ -42,6 +43,7 @@ class YoloModel(BaseModel):
 
     def __init__(self, model_name: str = "yolo26s.pt"):
         self.model_name = model_name
+        self.label = model_name.rsplit(".", 1)[0].upper()  # "yolo26s.pt" → "YOLO26S"
         self._models: dict[str, YOLO] = {}
         self._models_lock = threading.Lock()
         self._device = "cpu"
@@ -92,6 +94,7 @@ class YoloModel(BaseModel):
             tracker="bytetrack.yaml",
             verbose=False,
             device=self._device,
+            half=self._device == "cuda",  # FP16 roughly doubles NVIDIA throughput
         )
         boxes = results[0].boxes
         count = len(boxes)
@@ -155,7 +158,7 @@ class YoloModel(BaseModel):
 
     def info(self) -> ModelInfo:
         return ModelInfo(
-            name="yolo26s",
+            name=self.model_name.rsplit(".", 1)[0],
             version="bytetrack",
             source="pretrained",
             device=self._device,
@@ -164,8 +167,9 @@ class YoloModel(BaseModel):
 
 
 def annotate_frame(frame: np.ndarray, vision: dict | None, motion: dict | None,
-                   zone_label: str = "", preview_width: int = 640, quality: int = 70) -> bytes | None:
-    """Render the operator view: tracked boxes, IDs, flow arrows and a HUD."""
+                   zone_label: str = "", preview_width: int = 640, quality: int = 70,
+                   model_label: str = "") -> bytes | None:
+    """Render the operator view: labelled person boxes, movement arrows and a status bar."""
     H, W = frame.shape[:2]
     s = preview_width / W if W > preview_width else 1.0
     img = cv2.resize(frame, (int(W * s), int(H * s)), interpolation=cv2.INTER_AREA) if s != 1.0 else frame.copy()
@@ -184,31 +188,28 @@ def annotate_frame(frame: np.ndarray, vision: dict | None, motion: dict | None,
                 x0, y0 = int((c + 0.5) * w / cols), int((r + 0.5) * h / rows)
                 k = min(18.0, 6.0 * mag) / max(mag, 1e-6)
                 cv2.arrowedLine(img, (x0, y0), (int(x0 + dx * k), int(y0 + dy * k)),
-                                AMBER if mag > 3 else SAGE, 1, cv2.LINE_AA, tipLength=0.4)
+                                AMBER if mag > 3 else GREY, 1, cv2.LINE_AA, tipLength=0.4)
 
+    font = cv2.FONT_HERSHEY_SIMPLEX
     if vision:
         for d in vision.get("detections", []):
             x1, y1, x2, y2 = (int(v * s) for v in d["box"])
-            color = CRIMSON if d["fallen"] else LAVENDER
-            # Corner brackets instead of full boxes — cleaner on dense crowds
-            L = max(6, min(18, (x2 - x1) // 4))
-            for (px, py, sx, sy) in ((x1, y1, 1, 1), (x2, y1, -1, 1), (x1, y2, 1, -1), (x2, y2, -1, -1)):
-                cv2.line(img, (px, py), (px + sx * L, py), color, 2, cv2.LINE_AA)
-                cv2.line(img, (px, py), (px, py + sy * L), color, 2, cv2.LINE_AA)
-            tag = ("DOWN " if d["fallen"] else "") + (f"#{d['id']}" if d["id"] is not None else "")
-            if tag:
-                (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
-                cv2.rectangle(img, (x1, y1 - th - 6), (x1 + tw + 6, y1), color, -1)
-                cv2.putText(img, tag, (x1 + 3, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (31, 27, 27), 1, cv2.LINE_AA)
+            color = RED if d["fallen"] else WHITE
+            cv2.rectangle(img, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
+            tag = ("DOWN  " if d["fallen"] else "") + f"person {d['conf']:.2f}" + (f" #{d['id']}" if d["id"] is not None else "")
+            (tw, th), _ = cv2.getTextSize(tag, font, 0.42, 1)
+            ty = y1 - 4 if y1 - th - 8 > 0 else y1 + th + 8  # label above the box, or inside if at the top edge
+            cv2.rectangle(img, (x1 - 1, ty - th - 4), (x1 + tw + 8, ty + 4), color, -1)
+            cv2.putText(img, tag, (x1 + 4, ty), font, 0.42, WHITE if d["fallen"] else INK, 1, cv2.LINE_AA)
 
-    # HUD strip
+    # Status bar
     overlay = img.copy()
-    cv2.rectangle(overlay, (0, h - 26), (w, h), (31, 27, 27), -1)
-    img = cv2.addWeighted(overlay, 0.65, img, 0.35, 0)
-    hud = f"{zone_label}  |  {vision['person_count'] if vision else 0} PAX"
-    if motion:
-        hud += f"  |  FLOW {motion.get('ratio', 0):.1f}x"
-    cv2.putText(img, hud, (8, h - 9), cv2.FONT_HERSHEY_SIMPLEX, 0.42, CREAM, 1, cv2.LINE_AA)
+    cv2.rectangle(overlay, (0, h - 28), (w, h), INK, -1)
+    img = cv2.addWeighted(overlay, 0.7, img, 0.3, 0)
+    count = vision["person_count"] if vision else 0
+    hud = "  |  ".join(p for p in (model_label, f"{count} {'person' if count == 1 else 'people'}",
+                                f"movement x{motion.get('ratio', 0):.1f}" if motion else "", zone_label) if p)
+    cv2.putText(img, hud, (10, h - 10), font, 0.45, WHITE, 1, cv2.LINE_AA)
 
     ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
     return buf.tobytes() if ok else None

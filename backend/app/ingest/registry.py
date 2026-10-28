@@ -16,11 +16,14 @@ surfaced as "degraded" or "blind spot" status.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import secrets
 import time
 import uuid
 from typing import Optional
+
+from app.core.config import DATA_DIR
 
 from app.core.metrics import MetricsCollector
 from app.ingest.base import BaseSource, SourceKind, SourcePacket
@@ -31,6 +34,9 @@ logger = logging.getLogger("spectra.ingest.registry")
 MAX_QUEUE_DEPTH = 5
 # How long before a source is considered stale
 STALENESS_TIMEOUT_S = 10.0
+# Devices (and their pairing tokens) survive restarts, so a paired phone's
+# link keeps working and network cameras don't have to be added again.
+DEVICES_FILE = DATA_DIR / "devices.json"
 
 
 class SourceEntry:
@@ -45,7 +51,13 @@ class SourceEntry:
         token: str,
         zone_id: Optional[str] = None,
         adapter: Optional[BaseSource] = None,
+        url: Optional[str] = None,
+        config: Optional[dict] = None,
+        capabilities: Optional[dict] = None,
+        lat: Optional[float] = None,
+        lng: Optional[float] = None,
     ):
+        from app.ingest.factory import DEFAULT_CAPABILITIES
         self.source_id = source_id
         self.name = name
         self.kind = kind
@@ -53,6 +65,11 @@ class SourceEntry:
         self.token = token
         self.zone_id = zone_id
         self.adapter = adapter
+        self.url = url
+        self.config = config or {}
+        self.capabilities = {**DEFAULT_CAPABILITIES.get(adapter_type, {}), **(capabilities or {})}
+        self.lat = lat
+        self.lng = lng
 
         # Per-source queue — bounded, latest-wins
         self.queue: asyncio.Queue[SourcePacket] = asyncio.Queue(maxsize=MAX_QUEUE_DEPTH)
@@ -72,7 +89,7 @@ class SourceEntry:
         self.annotated_ts: float = 0.0
 
         # Task handle for the adapter's run loop
-        self._task: Optional[asyncio.Task] = None
+        self._task: Optional[tuple[Optional[asyncio.Task], asyncio.Task]] = None
 
     async def enqueue(self, packet: SourcePacket) -> None:
         """Enqueue a packet, dropping the oldest if full (latest-wins).
@@ -156,11 +173,22 @@ class SourceEntry:
             "inference_fps": MetricsCollector.instance().source(self.source_id).to_dict()["inference_fps"],
             "skipped_frames": MetricsCollector.instance().source(self.source_id).skipped_frames,
             "has_audio": self.has_audio,
+            "capabilities": self.capabilities,
+            "lat": self.lat,
+            "lng": self.lng,
+        }
+
+    def spec(self) -> dict:
+        """What is saved to disk to rebuild this device after a restart."""
+        return {
+            "id": self.source_id, "name": self.name, "kind": self.kind.value, "adapter": self.adapter_type,
+            "token": self.token, "zone_id": self.zone_id, "url": self.url, "config": self.config,
+            "capabilities": self.capabilities, "lat": self.lat, "lng": self.lng,
         }
 
     @property
     def has_audio(self) -> bool:
-        return self.kind == SourceKind.AUDIO or self.adapter_type == "browser_node"
+        return self.kind == SourceKind.AUDIO or bool(self.capabilities.get("audio"))
 
 
 class SourceRegistry:
@@ -186,22 +214,34 @@ class SourceRegistry:
         zone_id: Optional[str] = None,
         source_id: Optional[str] = None,
         adapter: Optional[BaseSource] = None,
+        token: Optional[str] = None,
+        url: Optional[str] = None,
+        config: Optional[dict] = None,
+        capabilities: Optional[dict] = None,
+        lat: Optional[float] = None,
+        lng: Optional[float] = None,
+        persist: bool = True,
     ) -> SourceEntry:
-        """Register a new source and generate its auth token."""
+        """Register a source. A new device gets a fresh auth token; a restored one keeps its own."""
         sid = source_id or str(uuid.uuid4())[:8]
-        token = secrets.token_urlsafe(16)
-
         entry = SourceEntry(
             source_id=sid,
             name=name,
             kind=kind,
             adapter_type=adapter_type,
-            token=token,
+            token=token or secrets.token_urlsafe(16),
             zone_id=zone_id,
             adapter=adapter,
+            url=url,
+            config=config,
+            capabilities=capabilities,
+            lat=lat,
+            lng=lng,
         )
         self._sources[sid] = entry
         logger.info("Registered source: %s (%s, %s, zone=%s)", name, sid, adapter_type, zone_id)
+        if persist:
+            self.save()
         return entry
 
     def unregister(self, source_id: str) -> None:
@@ -209,6 +249,44 @@ class SourceRegistry:
         if source_id in self._sources:
             entry = self._sources.pop(source_id)
             logger.info("Unregistered source: %s (%s)", entry.name, source_id)
+            self.save()
+
+    # ── Persistence ────────────────────────────────────────────────────
+
+    def save(self) -> None:
+        specs = [e.spec() for e in self._sources.values() if e.adapter_type != "simulated"]
+        try:
+            DEVICES_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = DEVICES_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(specs, indent=2))
+            tmp.replace(DEVICES_FILE)
+        except OSError as exc:
+            logger.warning("Could not save devices: %s", exc)
+
+    async def restore(self) -> None:
+        """Re-register saved devices with their original ids and tokens, and start them."""
+        from app.ingest.factory import AdapterError, build_adapter
+        if not DEVICES_FILE.exists():
+            return
+        try:
+            specs = json.loads(DEVICES_FILE.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not read %s (%s); starting with no devices", DEVICES_FILE, exc)
+            return
+        for spec in specs:
+            try:
+                adapter = build_adapter(spec["adapter"], spec["id"], spec["name"], spec.get("url"), spec.get("config"))
+            except AdapterError as exc:
+                logger.warning("Skipping saved device %s: %s", spec.get("name"), exc)
+                continue
+            self.register(
+                name=spec["name"], kind=SourceKind(spec["kind"]), adapter_type=spec["adapter"],
+                zone_id=spec.get("zone_id"), source_id=spec["id"], adapter=adapter, token=spec.get("token"),
+                url=spec.get("url"), config=spec.get("config"), capabilities=spec.get("capabilities"),
+                lat=spec.get("lat"), lng=spec.get("lng"), persist=False,
+            )
+            await self.start_source(spec["id"])
+        logger.info("Restored %d saved devices", len(self._sources))
 
     def get(self, source_id: str) -> Optional[SourceEntry]:
         return self._sources.get(source_id)
@@ -247,8 +325,8 @@ class SourceRegistry:
     async def start_source(self, source_id: str) -> None:
         """Start a source adapter's run loop."""
         entry = self._sources.get(source_id)
-        if not entry or not entry.adapter:
-            logger.warning("Cannot start source %s — not found or no adapter", source_id)
+        if not entry:
+            logger.warning("Cannot start source %s — not found", source_id)
             return
 
         async def _run_adapter():
@@ -271,8 +349,11 @@ class SourceRegistry:
             except asyncio.CancelledError:
                 pass
 
-        # We keep track of both the adapter task and the consumer task in a tuple
-        entry._task = (asyncio.create_task(_run_adapter()), asyncio.create_task(_run_consumer()))
+        # Token devices (phones on the /node page) push packets over /ws/node and have no
+        # adapter loop, but their queue still needs a consumer, or their video
+        # would fill the queue and never reach the models.
+        adapter_task = asyncio.create_task(_run_adapter()) if entry.adapter else None
+        entry._task = (adapter_task, asyncio.create_task(_run_consumer()))
         logger.info("Started source adapter & consumer: %s (%s)", entry.name, source_id)
 
     async def stop_source(self, source_id: str) -> None:
@@ -285,13 +366,12 @@ class SourceRegistry:
             await entry.adapter.stop()
 
         if entry._task:
-            adapter_task, consumer_task = entry._task
-            if not adapter_task.done():
-                adapter_task.cancel()
-            if not consumer_task.done():
-                consumer_task.cancel()
+            tasks = [t for t in entry._task if t is not None]
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
             try:
-                await asyncio.gather(adapter_task, consumer_task, return_exceptions=True)
+                await asyncio.gather(*tasks, return_exceptions=True)
             except asyncio.CancelledError:
                 pass
 

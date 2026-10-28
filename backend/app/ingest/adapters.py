@@ -13,6 +13,7 @@ import asyncio
 import logging
 import time
 import math
+import threading
 from typing import Optional, Callable, Awaitable
 
 import cv2
@@ -291,8 +292,12 @@ class LocalWebcamSource(BaseSource):
 class RtspHttpVideoSource(BaseSource):
     """Connects to RTSP/MJPEG/HTTP camera streams via OpenCV.
 
-    Auto-reconnects with exponential backoff on failure.
-    Works with real CCTV cameras and "IP Webcam" phone app.
+    Works with CCTV cameras, the Android IP Webcam app (http://<phone>:8080/video)
+    and tools/spectra_camera.py (http://<laptop>:<port>/stream). A background thread reads the stream as fast as the
+    camera sends and keeps only the newest frame; we hand that on at
+    target_fps. Reading one frame per tick instead would let the camera's
+    extra frames queue up, and the picture would fall further and further
+    behind real time. Reconnects with exponential backoff.
     """
 
     def __init__(self, source_id: str, name: str, url: str, target_fps: int = 5):
@@ -301,6 +306,20 @@ class RtspHttpVideoSource(BaseSource):
         self.target_fps = target_fps
         self._cap: Optional[cv2.VideoCapture] = None
         self._reconnect_count = 0
+        self._latest: Optional[np.ndarray] = None
+        self._latest_seq = 0
+        self._lock = threading.Lock()
+
+    def _reader(self, cap: cv2.VideoCapture, alive: threading.Event) -> None:
+        """Drain the stream continuously; only the newest frame is kept."""
+        while alive.is_set():
+            ok, frame = cap.read()
+            if not ok:
+                break
+            with self._lock:
+                self._latest = frame
+                self._latest_seq += 1
+        alive.clear()
 
     async def start(self, enqueue: Callable[[SourcePacket], Awaitable[None]]) -> None:
         self.is_running = True
@@ -310,7 +329,7 @@ class RtspHttpVideoSource(BaseSource):
 
         while self.is_running:
             logger.info("RtspHttpVideoSource %s: connecting to %s", self.name, self.url)
-            self._cap = cv2.VideoCapture(self.url)
+            self._cap = await asyncio.to_thread(cv2.VideoCapture, self.url)
 
             if not self._cap.isOpened():
                 self._reconnect_count += 1
@@ -323,43 +342,45 @@ class RtspHttpVideoSource(BaseSource):
                 backoff = min(backoff * 2, 30.0)
                 continue
 
-            backoff = 1.0  # Reset on successful connection
+            backoff = 1.0
             logger.info("RtspHttpVideoSource %s: connected", self.name)
+            alive = threading.Event()
+            alive.set()
+            reader = threading.Thread(target=self._reader, args=(self._cap, alive), daemon=True)
+            reader.start()
+            last_seq = 0
 
-            while self.is_running:
+            while self.is_running and alive.is_set():
                 t0 = time.time()
-                ret, frame = self._cap.read()
+                with self._lock:
+                    frame, seq = self._latest, self._latest_seq
+                if frame is not None and seq != last_seq:
+                    last_seq = seq
+                    preview = _resize_for_preview(frame, config.video.preview_width)
+                    jpeg = _encode_jpeg(preview, config.video.preview_quality)
+                    await enqueue(self._make_packet(
+                        payload=frame,
+                        ts_capture=time.time(),
+                        frame_jpeg=jpeg,
+                        metadata={"source_type": "rtsp_http", "url": self.url},
+                    ))
+                await asyncio.sleep(max(0, frame_interval - (time.time() - t0)))
 
-                if not ret:
-                    self._reconnect_count += 1
-                    logger.warning("RtspHttpVideoSource %s: stream interrupted, reconnecting…", self.name)
-                    MetricsCollector.instance().source(self.source_id).reconnect_count = self._reconnect_count
-                    break
-
-                preview = _resize_for_preview(frame, config.video.preview_width)
-                jpeg = _encode_jpeg(preview, config.video.preview_quality)
-
-                packet = self._make_packet(
-                    payload=frame,
-                    ts_capture=time.time(),
-                    frame_jpeg=jpeg,
-                    metadata={"source_type": "rtsp_http", "url": self.url},
-                )
-                await enqueue(packet)
-
-                elapsed = time.time() - t0
-                await asyncio.sleep(max(0, frame_interval - elapsed))
-
+            alive.clear()
+            await asyncio.to_thread(reader.join, 2.0)
             if self._cap:
                 self._cap.release()
                 self._cap = None
+            if self.is_running:
+                self._reconnect_count += 1
+                MetricsCollector.instance().source(self.source_id).reconnect_count = self._reconnect_count
+                logger.warning("RtspHttpVideoSource %s: stream interrupted, reconnecting…", self.name)
+                await asyncio.sleep(1.0)
 
         logger.info("RtspHttpVideoSource %s: stopped", self.name)
 
     async def stop(self) -> None:
         self.is_running = False
-        if self._cap:
-            self._cap.release()
 
     def status(self) -> dict:
         return {
@@ -417,3 +438,105 @@ class LocalMicSource(BaseSource):
 
     def status(self) -> dict:
         return {"device": self.device, "sample_rate": self.sample_rate}
+
+
+# ── HttpAudioSource ────────────────────────────────────────────────────
+
+class HttpAudioSource(BaseSource):
+    """Live WAV audio over HTTP, the way a network camera serves it.
+
+    Works with the Android IP Webcam app (http://<phone>:8080/audio.wav) and
+    the SPECTRA camera script (http://<laptop>:<port>/audio). Reads the WAV
+    header for the format, then hands on 0.5 s float32 mono chunks.
+    Reconnects with exponential backoff.
+    """
+
+    CHUNK_S = 0.5
+
+    def __init__(self, source_id: str, name: str, url: str):
+        super().__init__(source_id, name, SourceKind.AUDIO, {"url": url})
+        self.url = url
+        self._reconnect_count = 0
+
+    @staticmethod
+    def _read_exact(resp, n: int) -> bytes:
+        buf = b""
+        while len(buf) < n:
+            part = resp.read(n - len(buf))
+            if not part:
+                raise EOFError("stream ended")
+            buf += part
+        return buf
+
+    def _reader(self, loop: asyncio.AbstractEventLoop, q: asyncio.Queue, alive: threading.Event) -> None:
+        """Blocking HTTP read on a thread; pushes (samples, rate) chunks to q."""
+        import urllib.request
+        try:
+            with urllib.request.urlopen(self.url, timeout=10) as resp:
+                if self._read_exact(resp, 12)[8:12] != b"WAVE":
+                    raise ValueError("not a WAV stream")
+                channels, rate, bits = 1, 16000, 16
+                while True:  # walk chunks until the audio data starts
+                    cid = self._read_exact(resp, 4)
+                    size = int.from_bytes(self._read_exact(resp, 4), "little")
+                    if cid == b"fmt ":
+                        fmt = self._read_exact(resp, size)
+                        channels = int.from_bytes(fmt[2:4], "little")
+                        rate = int.from_bytes(fmt[4:8], "little")
+                        bits = int.from_bytes(fmt[14:16], "little")
+                    elif cid == b"data":
+                        break
+                    else:
+                        self._read_exact(resp, size)
+                if bits != 16:
+                    raise ValueError(f"{bits}-bit audio is not supported (need 16-bit PCM)")
+                logger.info("HttpAudioSource %s: %d Hz, %d channel(s)", self.name, rate, channels)
+                frame_bytes = 2 * channels
+                chunk_bytes = int(rate * self.CHUNK_S) * frame_bytes
+                while alive.is_set():
+                    raw = self._read_exact(resp, chunk_bytes)
+                    pcm = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+                    if channels > 1:
+                        pcm = pcm.reshape(-1, channels).mean(axis=1)
+                    loop.call_soon_threadsafe(lambda c=pcm: q.full() or q.put_nowait((c, rate)))
+        except Exception as exc:
+            logger.warning("HttpAudioSource %s: %s", self.name, exc)
+        finally:
+            alive.clear()
+
+    async def start(self, enqueue: Callable[[SourcePacket], Awaitable[None]]) -> None:
+        self.is_running = True
+        loop = asyncio.get_running_loop()
+        backoff = 1.0
+        while self.is_running:
+            logger.info("HttpAudioSource %s: connecting to %s", self.name, self.url)
+            q: asyncio.Queue = asyncio.Queue(maxsize=20)
+            alive = threading.Event()
+            alive.set()
+            reader = threading.Thread(target=self._reader, args=(loop, q, alive), daemon=True)
+            reader.start()
+            got_audio = False
+            while self.is_running and (alive.is_set() or not q.empty()):
+                try:
+                    chunk, rate = await asyncio.wait_for(q.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                got_audio = True
+                await enqueue(self._make_packet(
+                    payload=chunk, ts_capture=time.time(),
+                    metadata={"source_type": "http_audio", "sample_rate": rate},
+                ))
+            alive.clear()
+            if not self.is_running:
+                break
+            self._reconnect_count += 1
+            backoff = 1.0 if got_audio else min(backoff * 2, 30.0)
+            logger.warning("HttpAudioSource %s: stream lost, retrying in %.0f s", self.name, backoff)
+            await asyncio.sleep(backoff)
+        logger.info("HttpAudioSource %s: stopped", self.name)
+
+    async def stop(self) -> None:
+        self.is_running = False
+
+    def status(self) -> dict:
+        return {"url": self.url, "reconnect_count": self._reconnect_count}

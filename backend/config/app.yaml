@@ -14,6 +14,7 @@ server:
 
 video:
   analysis_fps: 5
+  yolo_model: "yolo26s.pt"   # yolo26n.pt is ~3× faster if the load test shows a slow computer
   preview_width: 640
   preview_quality: 70
   flow_width: 320

@@ -162,21 +162,20 @@ class EvidenceManager:
         duration = frames[-1][0] - frames[0][0]
         fps = max(1.0, min(30.0, (len(frames) - 1) / duration)) if duration > 0 else 5.0
         h, w = frames[0][1].shape[:2]
-        out = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"avc1"), fps, (w, h))
-        if not out.isOpened():
-            out = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+        w, h = w - w % 2, h - h % 2  # H.264 needs even dimensions
+        writer = _ClipWriter(path, w, h, fps)
 
         trigger_frame = None
         try:
             for t, frame in frames:
-                f = self._blur_faces(frame.copy(), source_id, t) if frame.shape[:2] == (h, w) else None
-                if f is None:
+                if frame.shape[0] < h or frame.shape[1] < w:
                     continue
+                f = self._blur_faces(frame[:h, :w].copy(), source_id, t)
                 if trigger_frame is None and t >= ts:
                     trigger_frame = f
-                out.write(f)
+                writer.write(f)
         finally:
-            out.release()
+            writer.close()
         cv2.imwrite(str(thumb), trigger_frame if trigger_frame is not None else self._blur_faces(frames[-1][1].copy(), source_id, frames[-1][0]),
                     [cv2.IMWRITE_JPEG_QUALITY, 80])
 
@@ -192,3 +191,45 @@ class EvidenceManager:
             "trigger_offset_s": round(ts - frames[0][0], 1),
             "face_blur": self._blur,
         }
+
+
+class _ClipWriter:
+    """Writes browser-playable H.264 MP4.
+
+    Uses the ffmpeg binary bundled with imageio-ffmpeg (Windows, macOS and
+    Linux alike); OpenCV's own H.264 support depends on the platform and is
+    usually missing on Windows, where clips would silently fall back to a
+    codec browsers can't play. OpenCV remains the fallback.
+    """
+
+    def __init__(self, path, w: int, h: int, fps: float):
+        self._proc = None
+        self._cv = None
+        try:
+            import subprocess
+            import imageio_ffmpeg
+            self._proc = subprocess.Popen(
+                [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error",
+                 "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{w}x{h}", "-r", f"{fps:.2f}", "-i", "-",
+                 "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+                 str(path)],
+                stdin=subprocess.PIPE,
+            )
+        except Exception as exc:
+            logger.warning("ffmpeg unavailable (%s); writing the clip with OpenCV", exc)
+            self._cv = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"avc1"), fps, (w, h))
+            if not self._cv.isOpened():
+                self._cv = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+
+    def write(self, frame) -> None:
+        if self._proc and self._proc.stdin:
+            self._proc.stdin.write(frame.tobytes())
+        elif self._cv:
+            self._cv.write(frame)
+
+    def close(self) -> None:
+        if self._proc and self._proc.stdin:
+            self._proc.stdin.close()
+            self._proc.wait(timeout=30)
+        if self._cv:
+            self._cv.release()

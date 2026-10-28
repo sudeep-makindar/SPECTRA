@@ -26,18 +26,29 @@ router = APIRouter()
 
 # ── Request/Response models ────────────────────────────────────────────
 
+class Capabilities(BaseModel):
+    video: bool = False
+    audio: bool = False
+    speaker: bool = False
+
+
 class CreateSourceRequest(BaseModel):
     name: str
-    kind: str  # "video" | "audio"
-    adapter: str  # "file_loop" | "webcam" | "rtsp_http" | "browser_node" | "simulated"
+    kind: Optional[str] = None  # derived from adapter + capabilities when omitted
+    adapter: str  # webcam | local_mic | browser_node | rtsp_http | http_audio | file_loop | simulated
     url: Optional[str] = None
     zone_id: Optional[str] = None
     config: Optional[dict] = None
+    capabilities: Optional[Capabilities] = None
+    lat: Optional[float] = None
+    lng: Optional[float] = None
 
 
 class UpdateSourceRequest(BaseModel):
     name: Optional[str] = None
     zone_id: Optional[str] = None
+    lat: Optional[float] = None
+    lng: Optional[float] = None
 
 
 # ── Health ─────────────────────────────────────────────────────────────
@@ -98,109 +109,48 @@ async def list_sources() -> list[dict]:
 
 @router.post("/sources", tags=["sources"])
 async def create_source(req: CreateSourceRequest) -> dict:
-    """Register a new source. Returns the source entry with its auth token.
-
-    For browser nodes, the token must be used when connecting via /ws/node.
-    For other adapters, the source is started automatically.
-    """
-    registry = SourceRegistry.instance()
-
-    kind = SourceKind.VIDEO if req.kind == "video" else SourceKind.AUDIO
-
-    # Create adapter instance based on type
-    adapter = None
-    if req.adapter == "file_loop":
-        if not req.url:
-            raise HTTPException(status_code=400, detail="file_loop adapter requires a 'url' (file path)")
-        from app.ingest.adapters import FileLoopSource
-        sid_prefix = f"file-{len(registry.all()) + 1}"
-        adapter = FileLoopSource(
-            source_id=sid_prefix,
-            name=req.name,
-            file_path=req.url,
-            target_fps=req.config.get("fps", 5) if req.config else 5,
-        )
-
-    elif req.adapter == "simulated":
-        from app.ingest.adapters import SimulatedSource
-        sid_prefix = f"sim-{len(registry.all()) + 1}"
-        adapter = SimulatedSource(
-            source_id=sid_prefix,
-            name=req.name,
-            target_fps=req.config.get("fps", 5) if req.config else 5,
-        )
-
-    elif req.adapter == "webcam":
-        from app.ingest.adapters import LocalWebcamSource
-        sid_prefix = f"cam-{len(registry.all()) + 1}"
-        adapter = LocalWebcamSource(
-            source_id=sid_prefix,
-            name=req.name,
-            device_index=req.config.get("device_index", 0) if req.config else 0,
-            target_fps=req.config.get("fps", 5) if req.config else 5,
-        )
-
-    elif req.adapter == "rtsp_http":
-        if not req.url:
-            raise HTTPException(status_code=400, detail="rtsp_http adapter requires a 'url'")
-        from app.ingest.adapters import RtspHttpVideoSource
-        sid_prefix = f"rtsp-{len(registry.all()) + 1}"
-        adapter = RtspHttpVideoSource(
-            source_id=sid_prefix,
-            name=req.name,
-            url=req.url,
-            target_fps=req.config.get("fps", 5) if req.config else 5,
-        )
-
-    elif req.adapter == "local_mic":
-        from app.ingest.adapters import LocalMicSource
-        kind = SourceKind.AUDIO
-        sid_prefix = f"mic-{len(registry.all()) + 1}"
-        adapter = LocalMicSource(
-            source_id=sid_prefix,
-            name=req.name,
-            device=req.config.get("device") if req.config else None,
-        )
-
-    elif req.adapter == "browser_node":
-        # No adapter needed — browser nodes connect via /ws/node
-        sid_prefix = f"node-{len(registry.all()) + 1}"
-
-    else:
-        raise HTTPException(status_code=400, detail=f"Unknown adapter type: {req.adapter}")
-
-    source_id = adapter.source_id if adapter else sid_prefix
-    if source_id in {e.source_id for e in registry.all()}:
-        import uuid
-        source_id = f"{source_id}-{uuid.uuid4().hex[:4]}"
-        if adapter:
-            adapter.source_id = source_id
-
+    """Add a device and start it. The response carries the pairing token, which
+    phones and laptops use to connect to /ws/node."""
+    from app.ingest.factory import AdapterError, ID_PREFIX, build_adapter, kind_for, DEFAULT_CAPABILITIES
     from app.zones.manager import ZoneManager
-    zone_id = req.zone_id if req.zone_id and ZoneManager.instance().get(req.zone_id) else ZoneManager.instance().default_zone_id()
+    import uuid
+
+    registry = SourceRegistry.instance()
+    existing = {e.source_id for e in registry.all()}
+    n = len(existing) + 1
+    source_id = f"{ID_PREFIX.get(req.adapter, 'dev')}-{n}"
+    if source_id in existing:
+        source_id = f"{source_id}-{uuid.uuid4().hex[:4]}"
+
+    try:
+        adapter = build_adapter(req.adapter, source_id, req.name, req.url, req.config)
+    except AdapterError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    caps = req.capabilities.model_dump() if req.capabilities else DEFAULT_CAPABILITIES.get(req.adapter, {})
+    kind = SourceKind(req.kind) if req.kind in ("video", "audio") else kind_for(req.adapter, caps)
+    zones = ZoneManager.instance()
+    zone_id = req.zone_id if req.zone_id and zones.get(req.zone_id) else zones.default_zone_id()
 
     entry = registry.register(
-        name=req.name,
-        kind=kind,
-        adapter_type=req.adapter,
-        zone_id=zone_id,
-        source_id=source_id,
-        adapter=adapter,
+        name=req.name, kind=kind, adapter_type=req.adapter, zone_id=zone_id, source_id=source_id,
+        adapter=adapter, url=req.url, config=req.config, capabilities=caps, lat=req.lat, lng=req.lng,
     )
-
-    # Auto-start non-browser adapters
-    if adapter:
-        import asyncio
-        asyncio.create_task(_start_source(source_id))
+    await registry.start_source(source_id)
 
     result = entry.to_dict()
-    result["token"] = entry.token  # Include token only in creation response
+    result["token"] = entry.token  # only returned here and by /pairing
     return result
 
 
-async def _start_source(source_id: str) -> None:
-    """Start a source adapter (runs as a background task)."""
-    await SourceRegistry.instance().start_source(source_id)
+@router.get("/sources/{source_id}/pairing", tags=["sources"])
+async def source_pairing(source_id: str) -> dict:
+    """Token and addresses a phone needs to connect (to show its pairing link again)."""
+    entry = SourceRegistry.instance().get(source_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Source not found")
+    config = load_config()
+    return {"token": entry.token, "port": config.server.port, "lan_ips": (await network_info())["lan_ips"]}
 
 
 @router.delete("/sources/{source_id}", tags=["sources"])
@@ -254,6 +204,9 @@ async def update_source(source_id: str, req: UpdateSourceRequest) -> dict:
         if req.zone_id and not ZoneManager.instance().get(req.zone_id):
             raise HTTPException(status_code=400, detail="Unknown zone")
         entry.zone_id = req.zone_id or None
+    if req.lat is not None and req.lng is not None:
+        entry.lat, entry.lng = req.lat, req.lng
+    SourceRegistry.instance().save()
     return entry.to_dict()
 
 
@@ -264,10 +217,9 @@ class ZoneRequest(BaseModel):
     area_m2: Optional[float] = None
     capacity: Optional[int] = None
     kind: Optional[str] = None
-    x: Optional[float] = None
-    y: Optional[float] = None
-    w: Optional[float] = None
-    h: Optional[float] = None
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    radius_m: Optional[float] = None
     sop: Optional[list[str]] = None
 
 
@@ -280,10 +232,25 @@ async def list_zones() -> list[dict]:
 @router.post("/zones", tags=["zones"])
 async def create_zone(req: ZoneRequest) -> dict:
     from app.zones.manager import ZoneManager
-    if not req.name:
-        raise HTTPException(status_code=400, detail="name is required")
+    if not req.name or not req.name.strip():
+        raise HTTPException(status_code=400, detail="A zone needs a name")
     fields = {k: v for k, v in req.model_dump().items() if v is not None and k != "name"}
-    return ZoneManager.instance().create(req.name, **fields).to_dict()
+    return ZoneManager.instance().create(req.name.strip(), **fields).to_dict()
+
+
+@router.delete("/zones/{zone_id}", tags=["zones"])
+async def delete_zone(zone_id: str) -> dict:
+    """Delete a zone; its devices move to the first remaining zone."""
+    from app.zones.manager import ZoneManager
+    zones = ZoneManager.instance()
+    if not zones.delete(zone_id):
+        raise HTTPException(status_code=400, detail="Can't delete: unknown zone, or it's the last one")
+    registry = SourceRegistry.instance()
+    for e in registry.all():
+        if e.zone_id == zone_id:
+            e.zone_id = zones.default_zone_id()
+    registry.save()
+    return {"status": "deleted"}
 
 
 @router.patch("/zones/{zone_id}", tags=["zones"])
@@ -293,17 +260,6 @@ async def update_zone(zone_id: str, req: ZoneRequest) -> dict:
     if not cfg:
         raise HTTPException(status_code=404, detail="Zone not found")
     return cfg.to_dict()
-
-
-@router.delete("/zones/{zone_id}", tags=["zones"])
-async def delete_zone(zone_id: str) -> dict:
-    from app.zones.manager import ZoneManager
-    if not ZoneManager.instance().delete(zone_id):
-        raise HTTPException(status_code=400, detail="Cannot delete (unknown or last zone)")
-    for e in SourceRegistry.instance().all():
-        if e.zone_id == zone_id:
-            e.zone_id = None
-    return {"status": "deleted"}
 
 
 @router.post("/zones/{zone_id}/acknowledge", tags=["zones"])
@@ -365,6 +321,107 @@ async def copilot_ask(req: AskRequest) -> dict:
 async def copilot_status() -> dict:
     from app.ai.copilot import Copilot
     return Copilot.instance().status()
+
+
+# ── Announcements ─────────────────────────────────────────────────────
+
+class AnnounceItem(BaseModel):
+    lang: str
+    text: str
+
+
+class AnnounceRequest(BaseModel):
+    zone_id: Optional[str] = None  # None = every zone
+    items: list[AnnounceItem]
+
+
+class TranslateRequest(BaseModel):
+    text: str
+    languages: list[str]
+
+
+class SpeakerHeartbeat(BaseModel):
+    id: str
+    name: str = "Dashboard"
+    zone_id: Optional[str] = None
+
+
+@router.post("/announce", tags=["announce"])
+async def announce(req: AnnounceRequest) -> dict:
+    """Play an announcement on every speaker in a zone (or every zone)."""
+    from app.announce import AnnouncementHub
+    items = [i.model_dump() for i in req.items if i.text.strip()][:4]
+    if not items:
+        raise HTTPException(status_code=400, detail="The announcement is empty")
+    for i in items:
+        i["text"] = i["text"].strip()[:500]
+    return await AnnouncementHub.instance().announce(req.zone_id or None, items)
+
+
+@router.post("/announce/translate", tags=["announce"])
+async def translate_announcement(req: TranslateRequest) -> dict:
+    from app.ai.copilot import Copilot
+    try:
+        return {"translations": await Copilot.instance().translate(req.text.strip()[:500], req.languages)}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Translation failed: {type(exc).__name__}")
+
+
+@router.post("/speakers/heartbeat", tags=["announce"])
+async def speaker_heartbeat(req: SpeakerHeartbeat) -> dict:
+    """A dashboard switched to "use this computer as a speaker" checks in here."""
+    from app.announce import AnnouncementHub
+    AnnouncementHub.instance().heartbeat(req.id, req.name, req.zone_id)
+    return {"status": "ok"}
+
+
+@router.delete("/speakers/{speaker_id}", tags=["announce"])
+async def speaker_leave(speaker_id: str) -> dict:
+    from app.announce import AnnouncementHub
+    AnnouncementHub.instance().remove_dashboard(speaker_id)
+    return {"status": "ok"}
+
+
+# ── Telegram alerts ───────────────────────────────────────────────────
+
+class TelegramChats(BaseModel):
+    chat_ids: list[str]
+
+
+@router.get("/notify/telegram", tags=["notify"])
+async def telegram_status() -> dict:
+    from app.notify.telegram import TelegramNotifier
+    return TelegramNotifier.instance().status()
+
+
+@router.post("/notify/telegram/find-chats", tags=["notify"])
+async def telegram_find_chats() -> dict:
+    """Groups and people that have messaged the bot recently, to pick where alerts go."""
+    from app.notify.telegram import TelegramError, TelegramNotifier
+    try:
+        n = TelegramNotifier.instance()
+        return {"bot_name": (await n.check())["bot_name"], "chats": await n.find_chats()}
+    except TelegramError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.put("/notify/telegram/chats", tags=["notify"])
+async def telegram_set_chats(req: TelegramChats) -> dict:
+    from app.notify.telegram import TelegramNotifier
+    n = TelegramNotifier.instance()
+    n.set_chat_ids(req.chat_ids)
+    return n.status()
+
+
+@router.post("/notify/telegram/test", tags=["notify"])
+async def telegram_test() -> dict:
+    from app.notify.telegram import TelegramError, TelegramNotifier
+    try:
+        return {"sent_to": await TelegramNotifier.instance().send_test()}
+    except TelegramError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
 
 
 # ── Network info (for phone pairing QR codes) ─────────────────────────

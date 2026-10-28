@@ -276,6 +276,12 @@ class FusionEngine:
         z.alert_level = res.level
         z.contributions, z.active_modalities, z.corroborated = res.contributions, res.active, res.corroborated
         z.forecast = core.forecast()
+        # A slow drift while calm extrapolates to "CRITICAL in 6 min", which reads
+        # as a false alarm. Only forecast once risk is raised and the ETA is near.
+        for key in ("eta_high_s", "eta_critical_s"):
+            eta = z.forecast.get(key)
+            if res.level == "normal" or (eta is not None and eta > 120):
+                z.forecast[key] = None
         z.history.append([round(now, 1), round(res.risk, 3), round(scores["vision"], 3),
                           round(scores["motion"], 3), round(scores["audio"], 3)])
         z.reasons = self._explain(z, ratio)
@@ -377,6 +383,8 @@ class FusionEngine:
             if inc:
                 inc["ended_at"] = time.time()
                 store.add_log(inc["id"], "closed", "system", "Zone returned to NORMAL")
+                from app.notify.telegram import TelegramNotifier
+                asyncio.get_running_loop().create_task(TelegramNotifier.instance().on_incident_closed(inc["id"]))
                 self._event(z, "incident_closed", "info", f"{z.name} back to NORMAL — incident closed",
                             incident_id=inc["id"])
             z.open_incident_id = None
@@ -400,9 +408,12 @@ class FusionEngine:
     def _spawn_followups(self, inc_id: str, zone_id: str, record: bool) -> None:
         from app.evidence.manager import EvidenceManager
         from app.ai.copilot import Copilot
+        from app.notify.telegram import TelegramNotifier
         if record:
             EvidenceManager.instance().trigger_incident(zone_id, inc_id)
-        asyncio.get_running_loop().create_task(Copilot.instance().brief_incident(inc_id))
+        loop = asyncio.get_running_loop()
+        loop.create_task(Copilot.instance().brief_incident(inc_id))
+        loop.create_task(TelegramNotifier.instance().on_incident(inc_id, first=record))
 
     # ── Helpers ────────────────────────────────────────────────────────
 

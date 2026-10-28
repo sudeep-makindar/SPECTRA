@@ -15,6 +15,13 @@ groups:
     weight: 1.0
     hard_trigger: true   # instant HIGH (see fusion.yaml gunshot_hard_trigger)
 
+  # A sharp bang that AudioSet doesn't call a gunshot (balloon pop, door slam,
+  # a muffled or distant shot). Weak evidence and never a hard trigger: it only
+  # becomes an alarm when the crowd also reacts.
+  impulse:
+    labels: ["Bang", "Burst, pop"]
+    weight: 0.8
+
   glass:
     labels: ["Glass", "Shatter", "Breaking"]
     weight: 0.7

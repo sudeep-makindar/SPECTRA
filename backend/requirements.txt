@@ -19,6 +19,7 @@ lap>=0.5.12               # ByteTrack assignment solver
 openai>=1.60             # OpenAI-compatible client for the AI co-pilot (Groq, Grok, OpenRouter, Ollama…)
 openai-whisper>=20240930  # distress keyword spotting (runs locally)
 opencv-python-headless>=4.8.0
+imageio-ffmpeg>=0.5          # bundled ffmpeg → H.264 incident clips that play in every browser
 numpy>=1.24.0
 librosa>=0.10.0
 soundfile>=0.12.0

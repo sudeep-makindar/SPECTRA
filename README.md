@@ -1,97 +1,112 @@
 # SPECTRA
 
-**Multimodal crowd-safety intelligence that tells a control room where to look and why, before a crowd becomes a crush.**
+**Crowd-safety monitoring that watches and listens to every camera at once, and only raises the alarm when its senses agree.**
 
-SPECTRA watches CCTV, microphones and ordinary phones at the same time. It turns what it sees and hears into a live, explainable risk score for every zone of a venue. When the risk is real, it raises one alert with an evidence clip, a plain-language AI briefing, and a bilingual PA announcement. When it isn't, it stays quiet.
+SPECTRA turns ordinary laptops and phones into a CCTV network. One computer with a GPU runs the AI: it counts people and measures how tightly they're packed, notices sudden rushes, and listens for screams, gunshots and calls for help ("help", "bachao", "madad"). When the risk is real it opens an alert with a video clip, an AI-written summary and to-do list, and plays a calm announcement in English, Hindi and Tamil on the speakers in that zone.
 
-> SPECTRA is a decision-support prototype for human operators, not a certified life-safety system. It measures and reports its own false-alarm rate.
+> SPECTRA is a decision-support prototype for human operators, not a certified life-safety system.
 
 ## Why
 
-India's recent crowd disasters (Hathras 2024; Tirupati, the Kumbh and Bengaluru in 2025) all happened in places full of cameras. The missing piece was a system that could watch every feed at once, recognise rising density and distress early, and get an operator's attention without crying wolf.
+India's recent crowd disasters (Hathras 2024; Tirupati, the Kumbh and Bengaluru in 2025) all happened in places full of cameras. What was missing was something that watches every feed at once, recognises rising density and distress early, and gets an operator's attention without crying wolf.
 
-Single-sensor products fail in opposite directions. Audio detectors page security for every song and firecracker. Vision detectors can't tell a happy dense crowd from a dangerous one. SPECTRA's core idea is **gated cross-modal fusion**: no single sensor can raise a CRITICAL alarm on its own, and independent sensors that agree compound into one.
+Single-sensor systems fail in opposite directions: sound-only detectors page security for every song, camera-only detectors can't tell a happy dense crowd from a dangerous one. SPECTRA's core idea is **gated fusion**: no single sense can reach "Act now", and independent senses that agree compound into a confident alarm.
 
-## What it does
+## What you see
 
-| | |
+| Page | What it shows |
 |---|---|
-| **See** | YOLO person detection + per-camera ByteTrack → headcount → **people/m² and Fruin Level of Service** (A–F), crowd heading, heading chaos, people-down heuristic, occupancy heatmap |
-| **Feel motion** | Farneback optical flow against each camera's *own* learned baseline (calibration window; spikes can't become the new normal) |
-| **Hear** | Audio Spectrogram Transformer (AudioSet) threat groups: screams, gunshots, glass, alarms. **Whisper** distress keywords in English, Hindi, Tamil and Telugu ("help", "bachao", "madad", "காப்பாத்துங்க"…). Fireworks, crackers and drums suppress the gunshot trigger |
-| **Fuse** | Per-zone gated fusion: per-sensor caps, debounced corroboration, hysteresis, a trend forecast ("CRITICAL in ~40 s"), and a ranked human-readable *why* |
-| **Act** | Incidents with H.264 evidence clips (8 s before / 6 s after, heads anonymised), operator workflow (hotkeys **A**cknowledge / **E**scalate / **M**ute), audit log, printable report |
-| **Brief** | **AI co-pilot** (any OpenAI-compatible LLM: Groq free tier by default, xAI Grok, OpenRouter, Gemini or a fully local Ollama): incident briefings with confidence, false-alarm check, SOP-grounded action checklist, PA announcements in **English and Hindi**, "Ask SPECTRA" Q&A, shift handover reports. It receives **signal metadata only**, never video or audio |
-| **Connect** | Mac camera and mic in one click; phones join by **QR code** and also act as steward pagers (red screen and vibration when their zone alarms); RTSP/IP cameras; recorded video |
-| **Prove** | Live p50/p95/p99 latency per stage, and an evaluation harness comparing SPECTRA with single-sensor detectors |
+| **Surveillance** | A CCTV wall of every camera with the AI overlay. Tiles glow amber → red as their zone heats up. |
+| **Camera focus** | One camera and every model working on it: each detected person and their confidence, movement vs that camera's normal, a live sound spectrogram, the top sound types, what Whisper heard, and the fusion arithmetic that gives the zone's risk. |
+| **Map** | Zones as circles on a real street map, coloured by risk, with a pin per device. |
+| **Dashboard** | Totals, a risk heatmap per zone over the last two minutes, a timeline of what happened, all alerts. |
+| **Alerts** | Clip (8 s before → 6 s after, faces blurred), AI summary, false-alarm check, to-do list, announcement, and a one-click **report**: a single HTML file with the timeline, clip frames, summary and every action taken (print it for a PDF). |
+| **Devices** | Add cameras and mics in four steps, with a live test before saving. |
+
+Plus **Announce** (EN / HI / TA, offline-ready messages and AI translation), **speaker mode** for any dashboard, **Telegram alerts** to a group chat (the reason at once, then the AI summary with a snapshot, then the report once it's calm), and **Run a demo**: scripted situations (gate surge, panic with "bachao", loud-but-safe concert, gunshot, cameras going dark) layered on the live sensors and labelled "Demo".
+
+## How it works
+
+```
+ Devices on the same Wi-Fi, each streaming like a CCTV camera
+ ─────────────────────────────────────────────────────────────
+ Laptops        tools/spectra_camera.py   http://<ip>:8081/stream  + /audio
+ Android phones IP Webcam app             http://<ip>:8080/video   + /audio.wav
+ Any phone      SPECTRA page (QR code)    pushes over WebSocket, can be a speaker
+ GPU computer   its own webcam + mic
+        │
+        ▼  SPECTRA server (one computer, NVIDIA GPU preferred)
+ ① Ingest      one reader per device, newest frame only → no growing delay
+ ② Perception  YOLO26s + ByteTrack (people) · Farnebäck optical flow (movement)
+               AST AudioSet classifier (sounds) · Whisper tiny (words, only on speech)
+ ③ Fusion      per zone, every 0.5 s: caps per sense, agreement compounds,
+               smoothing, Calm → Watch → Needs attention → Act now, trend forecast
+ ④ Alerts      clip + AI summary (LLM sees numbers only, never video or audio)
+ ⑤ Dashboard   live over WebSocket; speakers read announcements aloud
+```
+
+Fusion rule (`backend/app/fusion/core.py`, shared with the benchmark): each sense is capped (crowding 0.72, movement 0.50, sound 0.50). With one sense worried, risk is the highest capped value. With two or more, risk = 1.2 × (1 − Π(1 − capped)).
 
 ## Results
 
-The evaluation harness (`make eval`) replays 9 scenarios × 40 randomized trials through the production fusion code:
+The benchmark (`make eval`) replays 9 situations × 60 randomised runs through the production fusion code, with doubled sensor noise and 15% sensor dropout:
 
-| Detector (stress suite*) | Detection rate | False-alarm rate |
+| Approach | Catches real emergencies | False alarms |
 |---|---|---|
-| Audio-only | 75% | 40% |
-| Vision-only | 75% | 27% |
-| Motion-only | 75% | 20% |
-| Any-sensor OR | 100% | 80% |
-| **SPECTRA gated fusion** | **100%** | **13%** |
+| Sound only | 75% | 40% |
+| Camera head count only | 75% | 26% |
+| Movement only | 75% | 20% |
+| Any one sensor can alarm | 100% | 80% |
+| **SPECTRA (senses must agree)** | **100%** | **10%** |
 
-\*Stress suite: 2× sensor noise, 15% random sensor dropout, held-out seed. Thresholds were tuned on the standard suite. Traces model sensor *evidence*, not raw footage. See the System page for the method, confusion matrix and limitations.
+These are simulated sensor readings, not recorded footage: they test the decision logic, not detection accuracy.
 
-Measured on an Apple Silicon laptop (MPS): YOLO + ByteTrack ≈ 30 ms p50, optical flow ≈ 10 ms, capture → fused risk ≈ 35 ms p95, AST ≈ 250 ms per 2 s audio window, Whisper ≈ 300–500 ms only when speech is present.
+## Setup
 
-## Architecture
+### Windows with an NVIDIA GPU (recommended server)
 
-```
-Sources ── Mac cam/mic · phones (QR, WSS) · RTSP · video files
-   │        latest-frame-wins queues, one inference in flight per camera
-   ▼
-Perception (on-device, asyncio.to_thread — no MPS fork locks)
-   YOLO+ByteTrack ─ optical flow ─ AST ─ Whisper (speech-gated)
-   ▼
-FusionCore per zone (pure, shared with the eval harness)
-   caps → debounced corroboration → noisy-OR ×1.2 → smoothing → hysteresis → forecast
-   ▼
-Incidents ── evidence clips · audit log ── AI co-pilot (metadata only)
-   ▼
-React dashboard (WebSocket 2 Hz) · phone pager · PDF report
-```
+1. Install [Git](https://git-scm.com/download/win), [Python 3.12](https://www.python.org/downloads/) (tick **Add python.exe to PATH**), [Node.js LTS](https://nodejs.org/) and the latest NVIDIA driver.
+2. `git clone https://github.com/sudeep-makindar/SPECTRA.git`
+3. Copy your `.env` into the SPECTRA folder: `GROQ_API_KEY` (free at console.groq.com/keys) for the AI assistant, `TELEGRAM_BOT_TOKEN` (from @BotFather) for Telegram alerts. Never commit it.
+4. Double-click **`Setup SPECTRA.bat`** once (about 3 GB; do it on good Wi-Fi).
+5. Double-click **`Start SPECTRA.bat`**. It prints the dashboard address for other devices.
 
-Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · demo script: [docs/DEMO.md](docs/DEMO.md)
-
-## Quick start
+### macOS / Linux
 
 ```bash
-make setup                      # Python deps (uv/pip) + npm install
-cp .env.example .env            # optional: GROQ_API_KEY (free) or another provider for the AI co-pilot
-./scripts/make_https.sh         # self-signed cert so phones can stream camera/mic
-
-make dev-backend                # :8000 (models load in the background)
-make dev-frontend               # https://localhost:5173
+make setup                 # Python deps + npm install
+cp .env.example .env       # add GROQ_API_KEY for the AI assistant
+make dev-backend           # :8000
+make dev-frontend          # :5173
 ```
 
-Then open **Devices** to add the Mac camera and pair phones by QR, and use **Drills** (top bar) to run scripted, clearly labelled simulations (gate surge, panic + "bachao", concert false-alarm test, gunshot, sensor blackout).
+### Connect cameras and microphones
+
+See **[tools/README.md](tools/README.md)**: IP Webcam on Android phones, the camera script on other laptops, the QR page for any phone.
+
+### Check the computer keeps up
+
+With SPECTRA running: `python tools/loadtest.py` (default 4 cameras + 4 mics). On an Apple Silicon Mac, 4 + 4 falls behind (about 2 of 5 frames a second analysed); on an NVIDIA laptop it should keep up. If not, set `video.yolo_model: yolo26n.pt` in `backend/config/app.yaml`.
 
 ```bash
-make test                       # unit tests incl. fusion safety properties
-make eval                       # benchmark → data/eval/report.{json,md}
+make test                  # backend tests
+make eval                  # fusion benchmark → data/eval/report.{json,md}
 ```
 
-## Privacy & ethics
+## Privacy
 
-- All perception runs on the edge machine. Raw video and audio never leave it.
-- The LLM receives structured numbers and short keyword transcripts only, and briefings fall back to offline templates with no network.
-- Stored clips have every detected person's head region pixelated (aligned with the DPDP Act's data-minimisation principle). Retention is configurable.
-- Simulated signals are flagged `SIM` everywhere they appear. The UI always shows "Decision-support prototype · Not a certified safety system".
+- All AI runs on the SPECTRA computer. Video and audio never leave the local network.
+- The LLM receives numbers and short labels only; without internet, summaries use built-in templates and the ready-made announcements still work in all three languages.
+- Saved clips have every detected person's face blurred.
+- Simulated signals are labelled "Demo" everywhere.
 
 ## Limitations
 
-- Pretrained models are not fine-tuned on crowd-disaster data; the fusion benchmark uses synthetic sensor-evidence traces.
-- Headcount → density assumes non-overlapping cameras and a configured floor area per zone.
-- The fallen-person heuristic is aspect-ratio based and noisy.
-- Single-machine deployment.
+- The models are general-purpose (COCO, AudioSet), not trained on crowd disasters; the benchmark uses simulated sensor readings.
+- Crowding is estimated from a head count and the floor area entered per zone, assuming cameras don't overlap.
+- The "person on the ground" check is a box-shape heuristic and is noisy.
+- The trend forecast extrapolates the current trend; it isn't a trained predictor.
 
-## License notes
+## Licences
 
-Ultralytics YOLO is AGPL-3.0. Deployments must comply or obtain a commercial licence. The AST model is BSD-licensed; Whisper is MIT.
+Ultralytics YOLO is AGPL-3.0; deployments must comply or obtain a commercial licence. AST is BSD-licensed; Whisper is MIT.

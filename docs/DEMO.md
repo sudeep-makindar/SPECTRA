@@ -1,60 +1,65 @@
 # SPECTRA — Final Review Demo Runbook
 
-## 0. Before the judges arrive (10 min)
+**Setup:** the HP Victus runs SPECTRA. The Mac, the Victus and two Android phones are the
+4 cameras + 4 microphones. The Mac shows the dashboard on the projector. The Mac and the
+Victus are the speakers.
 
-```bash
-# Terminal 1 — backend (models load in ~20 s; watch for "Startup complete")
-cd backend && .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+| Device | Camera + mic via | Zone | Speaker |
+|---|---|---|---|
+| HP Victus | its own webcam + mic (**Add device → SPECTRA computer's webcam → Camera and mic**) | Gate | yes, set to Gate |
+| Mac | `tools/Start SPECTRA camera.command` (**Add device → Another laptop**) | Stage | yes, set to Every zone |
+| Phone 1 | IP Webcam app (**Add device → Android phone**) | Gate | no |
+| Phone 2 | IP Webcam app (**Add device → Android phone**) | Stage | no |
 
-# Terminal 2 — frontend (HTTPS so phones can use camera + mic)
-./scripts/make_https.sh --force      # re-run whenever you change Wi-Fi
-cd frontend && npm run dev
-```
+## The night before
 
-1. Put an LLM key in `.env` at the project root, then restart the backend. The default is Groq's free tier:
-   `LLM_PROVIDER=groq` and `GROQ_API_KEY=gsk_...` (get one at console.groq.com/keys).
-   For xAI Grok use `LLM_PROVIDER=xai` + `XAI_API_KEY=...`; for a fully offline demo, `LLM_PROVIDER=ollama` with Ollama running locally.
-   The sidebar's **System health → Co-pilot** should show the provider name, not "Offline".
-2. Open `https://localhost:5173` on the Mac (accept the certificate warning once).
-3. **Incidents → Clear all** to remove rehearsal incidents.
-4. **Devices → This Mac → Camera** (zone: Main Gate) and **→ Microphone** (zone: Main Gate).
-   The first time, macOS asks for camera/mic permission for the terminal. Allow it, then re-add.
-5. **Devices → Pair a phone** (zone: Stage Front) → scan the QR → accept the cert warning → **Start streaming**.
-   Repeat for phone 2 (zone: Exit Corridor).
-6. **Devices → IP camera or video** → path to your recorded crowd video (zone: Stage Front or Exit Corridor).
-7. **Zones → Main Gate**: set **Area m²** to the floor area your Mac camera actually sees (~3–4 m² at a desk).
-   This turns headcount into people/m², so 3–4 people in frame reads as LoS C/D.
-8. Keep the **Performance** page open in a second tab for the latency/eval segment.
+1. On the Victus: `git pull`, then run **Setup SPECTRA.bat** again so new packages and models are in place.
+2. **Start SPECTRA.bat**, then `backend\.venv\Scripts\python tools\loadtest.py`. Every row should say *keeps up*.
+3. Put your free Groq key in `.env` (`GROQ_API_KEY=gsk_…`). The AI summary and **Translate with AI** need it; everything else works without it.
+4. Telegram: `TELEGRAM_BOT_TOKEN` is in `.env`. Add the bot to your team's group, send a message there, then **Devices → Alerts on Telegram → Find my group** → tick it → **Send a test message**. Telegram needs internet; some college Wi-Fi blocks it, so check it at the venue too (a phone hotspot works).
+5. Charge everything. The phones stream for hours on a charger.
+6. Rehearse the gunshot: play a gunshot sound effect from a third phone near one of the mics. A balloon pop works too. Check the **Sound** panel on that camera's focus page shows "Gunshot, gunfire" or "Bang".
 
-## 1. The 5-minute story
+## At the venue (15 minutes)
 
-| Time | Show | Say |
+1. Put all four devices on **one Wi-Fi network**. If the venue Wi-Fi blocks devices from seeing each other, use a phone hotspot for everything.
+2. Victus: **Start SPECTRA.bat**. Note the address it prints (e.g. `192.168.1.30`). Allow Python and Node.js on private networks if Windows asks.
+3. Phones: open IP Webcam and tap **Start server**. Note each phone's address.
+4. Mac: double-click `tools/Start SPECTRA camera.command`. Open `http://<victus-ip>:5173` in the browser and put it on the projector.
+5. **Map → Edit layout**: create the zones **Gate** and **Stage**, place them on the map.
+6. **Devices → Add device** for each of the four devices, in the zones above. Each one shows its live picture before you leave the dialog.
+7. **Devices → Zones**: set each zone's floor area to what its cameras actually see (about 4–6 m² at a table). This is what turns 4–5 friends in frame into "Crowded".
+8. Speaker button (top bar) on the Mac: **Every zone**. On the Victus: **Gate**. Click once on each page so the browser allows sound. Press **Test** to hear it.
+9. **Alerts → Clear history** to remove rehearsal alerts.
+
+## The 5-minute story
+
+| Time | Do | Say |
 |---|---|---|
-| 0:00 | Command Center | "Crowd crushes in India (Hathras 2024, Tirupati and Bengaluru 2025, Kumbh) aren't detected late because there were no cameras. Control rooms have a hundred feeds and no way to know which one matters. SPECTRA watches every camera, microphone and phone at once and tells the operator **where to look and why**." |
-| 0:40 | Live Ops: your face on the Mac camera, phones | "Everything runs on this laptop: YOLO tracking, optical flow, an audio transformer, Whisper. Phones become sensors by scanning a QR code. No video leaves the building." |
-| 1:10 | Gather 3–4 people in front of the Mac camera | Watch Main Gate's people/m² and Fruin Level of Service climb live. "Fruin LoS is what crowd-safety engineers actually use. At F, over 5 people/m², people can no longer move on their own." |
-| 1:40 | **Drills (top bar) → Concert Peak (False-Alarm Test)** on Stage Front | "Here's why other systems fail. Loud singing and shouting: an audio-only detector would page security every song. SPECTRA caps any single sensor, so this stays ELEVATED. **No false alarm.**" |
-| 2:20 | **Drills → Panic Scatter & Distress** on Main Gate (or have someone shout "help!" / "bachao!" into the Mac mic while people move quickly) | Banner goes CRITICAL, tone plays, phone on that zone turns red and vibrates. "Motion surged 4× above this camera's own baseline, the audio model heard screaming, and Whisper caught 'bachao'. Three independent sensors agree, so risk compounds." |
-| 3:00 | Click **Open incident** | Evidence clip with 8 s before and 6 s after the trigger, heads anonymised. The **AI briefing**: what's happening, a confidence level, a false-alarm check, an action checklist from the zone's SOPs, and the PA announcement in **English and Hindi**. "The language model only sees the numbers, never the video." |
-| 3:40 | Press **A** (acknowledge), **E** (escalate) | Audit log records every operator action. **Report** gives a printable incident report. |
-| 4:00 | **Performance** page | Live p95 latency (~35 ms capture→alert for YOLO). Then the benchmark: "Across 9 scenarios × 40 randomized trials, any-sensor OR catches everything but raises false alarms 80% of the time. SPECTRA keeps 100% detection and cuts false alarms to 13% under noise and sensor dropout." |
-| 4:30 | **Drills → Sensor Failure / Blind Spot** | "A dead camera must never look like a calm zone." Zone goes BLIND, dashed outline, event logged. |
-| 4:45 | **Incidents → Shift handover** | The co-pilot writes the handover for the next shift lead. Close on "decision support, not autopilot". |
+| 0:00 | **Surveillance**: four live tiles | "India's crowd disasters happened in places full of cameras. Nobody can watch a hundred feeds. SPECTRA watches and listens to all of them, and every one of these is just a phone or a laptop." |
+| 0:40 | Click the Mac's tile → **Camera focus** | "Here's every model working live: YOLO finds each person with a confidence score, optical flow compares movement with this camera's normal, and the audio transformer and Whisper listen. All on one laptop GPU; nothing goes to the cloud." |
+| 1:30 | Friends crowd in front of the Gate phone | The Crowd meter climbs; Gate turns **Watch**, then **Needs attention**. "Packed crowding alone is serious, so it reaches Needs attention, but no single sense can ever say Act now." |
+| 2:00 | A friend shouts "Help! Bachao!" into the same phone | Gate hits **Act now**, the chime plays, the tile glows red. Point at the fusion panel: "Two senses agree, so the risk compounds: here's the actual arithmetic." |
+| 2:40 | **What to do** on the banner | The alert: clip with faces blurred, AI summary, false-alarm check, to-do list. "The AI only ever sees numbers, never the video." |
+| 3:20 | **Announce this** → tick हिंदी and தமிழ் → **Play** | The Victus and the Mac read it aloud in three languages. Hold up a phone: the Telegram group already has the alert, the AI summary and a snapshot. |
+| 3:50 | Play the gunshot sound near the Stage mic | Stage jumps to **Needs attention** instantly; people scattering makes it **Act now**. |
+| 4:20 | **Run a demo → Loud concert, but safe** | Sound goes loud, status stays **Watch**. "A sound-only system would have called security. SPECTRA doesn't." |
+| 4:45 | **Dashboard**, then **Alerts → Report** | Heatmap and timeline of everything that just happened, then the one-page report anyone can be sent. "Decision support, not autopilot." |
 
-## 2. Likely judge questions
+## Likely questions
 
-- **"Isn't the benchmark synthetic?"** Yes, and the page says so. It tests the fusion logic with randomized sensor evidence through the exact production code. Thresholds were tuned on the standard suite, and the headline numbers come from a held-out stress suite. Perception latency is measured on real video (`make eval`).
-- **"Why not just use the LLM for detection?"** Latency, privacy and cost. Detection is deterministic and runs on-device in milliseconds. The LLM only writes the briefing, from metadata, after the alarm, and any provider (or a local model) can be swapped in.
-- **"What about Diwali crackers / stage pyro?"** Fireworks, firecrackers and drums suppress the gunshot hard-trigger when the audio model rates them more likely.
-- **"Privacy / DPDP Act?"** All inference is on the edge. Stored clips have heads pixelated using the person detector. The LLM receives no images or audio.
-- **"Scale?"** Each camera has one inference in flight with latest-frame-wins backpressure. Load shows up as skipped frames, never as growing latency. The System page shows this live.
+- **"Is the benchmark real footage?"** No, and we say so: it replays simulated sensor readings through the exact production fusion code, to test the decision logic. Detection accuracy comes from the pretrained models.
+- **"Why not let the LLM decide?"** Latency, privacy and cost. Detection is deterministic and runs on the local GPU in milliseconds; the LLM only writes the summary afterwards, from numbers.
+- **"Diwali crackers?"** A gunshot that the sound model rates as more like fireworks, crackers or drums doesn't trigger.
+- **"Privacy / DPDP Act?"** All analysis is on the local network, clips have faces blurred, the LLM gets no images or audio.
+- **"Scale?"** Each camera keeps only its newest frame, so load shows up as fewer analysed frames, never as growing delay. `tools/loadtest.py` measures it.
 
-## 3. If something breaks
+## If something breaks
 
 | Problem | Fix |
 |---|---|
-| Phone says camera blocked | It opened `http://`. Use the `https://` QR link and accept the certificate warning. |
-| Phone can't reach the Mac | Same Wi-Fi? Venue Wi-Fi often isolates clients. Use your phone hotspot for the Mac and the phones, then run `./scripts/make_https.sh --force` and restart Vite. |
-| Mac camera tile says "No signal" | macOS camera permission for the terminal app: System Settings → Privacy → Camera. |
-| Co-pilot shows "offline templates" | No key in `.env` (e.g. `GROQ_API_KEY`), or no internet. Use `LLM_PROVIDER=ollama` for offline. Templates still work, so the demo still runs. |
-| Everything is slow | Close other apps. Remove extra camera sources. AI fps per camera is on the System page. |
+| A device won't connect | Open its address in the Victus browser (`http://<phone>:8080/`, `http://<mac>:8081/`). If that fails, the devices can't see each other: use a phone hotspot. |
+| A tile shows "Waiting for the device" | IP Webcam stopped (tap **Start server** again) or the camera script window was closed. |
+| No sound on a speaker | Click the page once, check the volume, press **Test** in the speaker dialog. On Windows, use Microsoft Edge for the Hindi and Tamil voices. |
+| AI summary says "offline summary" | No internet or no Groq key. The ready-made announcements still work in all three languages. |
+| Everything is slow | Close other apps on the Victus. In `backend/config/app.yaml` set `video.yolo_model: yolo26n.pt` and restart. |

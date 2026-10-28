@@ -37,7 +37,7 @@ and the gated fusion score. Fusion caps any single sensor; corroboration across 
 Rules:
 - SPECTRA is decision support, not a certified safety system. Be calibrated: say what the signals show, how \
 confident you are, and what could make it a false alarm. Never invent facts that are not in the data.
-- Ground recommended actions in the zone's standard operating procedures when they fit; name the responsible role.
+- Ground recommended actions in the venue's standard operating procedures when they fit; name the responsible role.
 - Public-address announcements must be calm, short and directional (tell people where to go). Never use the \
 words "stampede" or "panic" in a PA message.
 - Write plainly."""
@@ -102,6 +102,7 @@ class Copilot:
             "provider_label": self.llm.label,
             "model": self.llm.model if self.enabled else "offline templates",
             "key_env": self.llm.key_env,
+            "backups": self.llm.backups,
             "last_error": self.last_error,
             "calls": self.calls,
         }
@@ -197,20 +198,48 @@ class Copilot:
     def _template_brief(inc: dict, zone) -> dict:
         snap = inc["peak_snapshot"]
         reasons = snap.get("reasons") or ["Fused risk crossed the alert threshold"]
-        level = inc["peak_level"].upper()
-        sop = (zone.sop if zone else []) or ["Dispatch nearest stewards to the zone"]
-        actions = [{"role": "Control room", "action": f"Put {inc['zone_name']} cameras on the main wall and verify visually", "priority": "now"}]
-        actions += [{"role": "Zone stewards", "action": s, "priority": "next"} for s in sop[:3]]
+        headline = {"critical": "Crowd in danger: act now", "high": "Crowd needs attention"}.get(
+            inc["peak_level"], "Unusual crowd activity")
+        sop = (zone.sop if zone else []) or ["Send the nearest stewards to the crowd"]
+        actions = [{"role": "Control room", "action": "Look at the live camera and confirm what the sensors report", "priority": "now"}]
+        actions += [{"role": "Stewards", "action": s, "priority": "next"} for s in sop[:3]]
         return {
-            "headline": f"{level} risk at {inc['zone_name']}",
+            "headline": headline,
             "summary": "; ".join(reasons[:3]) + ".",
-            "likely_situation": "Automated template — verify on camera before acting.",
-            "false_alarm_check": "Confirm on the live feed; single-sensor spikes are capped by fusion but may still be benign.",
+            "likely_situation": "Several sensors agree something is wrong. Check the live camera to confirm before acting.",
+            "false_alarm_check": "Look at the live camera. One sensor alone can never raise this alarm, but a staged event or unusual noise could still trigger it.",
             "confidence": "high" if snap.get("corroborated") else "medium",
             "recommended_actions": actions,
-            "pa_announcement_en": f"Attention please. To keep everyone comfortable, please move slowly away from {inc['zone_name']} and follow steward directions.",
-            "pa_announcement_hi": f"कृपया ध्यान दें। कृपया {inc['zone_name']} से धीरे-धीरे दूर जाएँ और स्टीवर्ड के निर्देशों का पालन करें।",
+            "pa_announcement_en": "Attention please. To keep everyone comfortable, please move slowly away from the crowded area and follow steward directions.",
+            "pa_announcement_hi": "कृपया ध्यान दें। कृपया भीड़ वाले क्षेत्र से धीरे-धीरे दूर जाएँ और स्टीवर्ड के निर्देशों का पालन करें।",
         }
+
+    # ── Announcement translation ───────────────────────────────────────
+
+    LANGUAGE_NAMES = {"hi": "Hindi (Devanagari script)", "ta": "Tamil (Tamil script)", "en": "English"}
+
+    async def translate(self, text: str, languages: list[str]) -> dict[str, str]:
+        """Translate a PA announcement. Raises RuntimeError when no LLM is available."""
+        wanted = [l for l in languages if l in self.LANGUAGE_NAMES and l != "en"]
+        if not wanted:
+            return {}
+        if not self.enabled:
+            raise RuntimeError(f"AI assistant is offline (set {self.llm.key_env or 'an LLM key'} in .env)")
+        self.calls += 1
+        spec = ", ".join(f'"{l}": "<{self.LANGUAGE_NAMES[l]}>"' for l in wanted)
+        out = await self.llm.chat(
+            "You translate public-address announcements for crowds at Indian venues. Keep the meaning, keep it "
+            "calm, short and natural to say aloud, and keep directions (exits, gates) exact. Never add the words "
+            "'stampede' or 'panic'. Respond with only a JSON object.",
+            f"Announcement (English): {text}\n\nReturn exactly: {{{spec}}}",
+            json_mode=True, max_tokens=600, temperature=0.1,
+        )
+        data = parse_json(out)
+        result = {l: str(data.get(l, "")).strip() for l in wanted if str(data.get(l, "")).strip()}
+        if not result:
+            raise RuntimeError("the AI assistant returned no translation")
+        self.last_error = None
+        return result
 
     # ── Operator Q&A ───────────────────────────────────────────────────
 
@@ -237,7 +266,7 @@ class Copilot:
             answer = (f"AI co-pilot is offline (set {self.llm.key_env or 'LLM_API_KEY'}). Raw picture: "
                       + (f"highest risk is {hottest['zone']} at {round((hottest['fused_risk'] or 0) * 100)} "
                          f"({hottest['alert_level']}). " + "; ".join(hottest["sensor_reasons"] or [])
-                         if hottest else "no zones configured."))
+                         if hottest else "no sensor data yet."))
             return {"answer": answer, "source": "template"}
         try:
             self.calls += 1
@@ -253,7 +282,7 @@ class Copilot:
             return {"answer": text, "source": "llm", "model": f"{self.llm.label} · {self.llm.model}"}
         except Exception as exc:
             self._fail(exc)
-            return {"answer": f"Co-pilot unavailable ({type(exc).__name__}). Check the zone cards directly.",
+            return {"answer": f"Co-pilot unavailable ({type(exc).__name__}). Check the live view directly.",
                     "source": "error"}
 
     # ── Shift handover ─────────────────────────────────────────────────

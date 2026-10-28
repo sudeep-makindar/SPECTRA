@@ -29,6 +29,7 @@ _live_clients: set[WebSocket] = set()
 
 
 def live_payload() -> dict:
+    from app.announce import AnnouncementHub
     from app.incidents.store import IncidentStore
     from app.scenarios.director import ScenarioDirector
     from app.zones.manager import ZoneManager
@@ -43,6 +44,9 @@ def live_payload() -> dict:
     payload["events"] = fusion.events(60)
     payload["incidents"] = IncidentStore.instance().summaries(20)
     payload["scenarios"] = ScenarioDirector.instance().active()
+    hub = AnnouncementHub.instance()
+    payload["announcements"] = hub.recent(10)
+    payload["speakers"] = hub.speakers()
     payload["metrics"] = MetricsCollector.instance().snapshot()
     return {"type": "state", "ts": time.time(), **payload}
 
@@ -89,6 +93,9 @@ async def ws_node(ws: WebSocket, token: str = Query(...)):
     await ws.accept()
     logger.info("Node connected: %s (%s)", entry.name, entry.source_id)
     entry.status = "online"
+    entry.last_seen = time.time()
+    from app.announce import AnnouncementHub
+    AnnouncementHub.instance().attach_node(entry.source_id, ws)
     perception = PerceptionManager.instance()
 
     try:
@@ -134,6 +141,7 @@ async def ws_node(ws: WebSocket, token: str = Query(...)):
                 try:
                     msg = json.loads(data["text"])
                     if msg.get("type") == "ping":
+                        entry.last_seen = time.time()  # keeps speaker-only devices online
                         zone = FusionEngine.instance().get_zone(FusionEngine.instance().zone_of_source(entry.source_id))
                         await ws.send_json({"type": "pong", "ts": time.time(),
                                             "zone": zone.name if zone else None,
@@ -146,8 +154,41 @@ async def ws_node(ws: WebSocket, token: str = Query(...)):
     except Exception as exc:
         logger.warning("Node %s error: %s", entry.source_id, exc)
     finally:
+        AnnouncementHub.instance().detach_node(entry.source_id, ws)
         entry.status = "offline"
         logger.info("Node disconnected: %s (%s)", entry.name, entry.source_id)
+
+
+# ── /ws/inspect/<source_id> — Model outputs for the camera focus view ──
+
+@router.websocket("/ws/inspect/{source_id}")
+async def ws_inspect(ws: WebSocket, source_id: str):
+    """Twice a second: this camera's detections and motion, and the sound
+    analysis from its own mic or, failing that, the most recent mic in its zone."""
+    from app.perception.workers import PerceptionManager
+
+    await ws.accept()
+    pm = PerceptionManager.instance()
+    registry = SourceRegistry.instance()
+    try:
+        while True:
+            entry = registry.get(source_id)
+            if entry is None:
+                await ws.close(code=4004, reason="Unknown source")
+                return
+            now = time.time()
+            audio = pm.audio_insights.get(source_id)
+            if audio is None or now - audio["ts"] > 5:
+                in_zone = [pm.audio_insights[e.source_id] for e in registry.all()
+                           if e.zone_id == entry.zone_id and e.source_id in pm.audio_insights
+                           and now - pm.audio_insights[e.source_id]["ts"] <= 5]
+                audio = max(in_zone, key=lambda a: a["ts"], default=None)
+            await ws.send_json({"ts": now, **pm.insights.get(source_id, {}), "audio": audio})
+            await asyncio.sleep(0.5)
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.debug("Inspect client error: %s", exc)
 
 
 # ── /ws/preview/<source_id> — Camera preview stream ───────────────────

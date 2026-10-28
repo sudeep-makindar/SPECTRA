@@ -1,27 +1,12 @@
 /**
- * Spectra mark — a prism splitting one signal into three (vision, motion, audio).
+ * Spectra mark — an eye with a pulse inside: watching over people's safety.
  */
 
-export function SpectraLogo({ size = 20, className = '' }: { size?: number; className?: string }) {
+export function SpectraLogo({ size = 20 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" className={className} aria-label="Spectra">
-      <path d="M16 4L28 26H4L16 4Z" stroke="currentColor" strokeWidth="2.2" strokeLinejoin="round" />
-      <line x1="16" y1="14" x2="10.5" y2="22" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" opacity="0.6" />
-      <line x1="16" y1="14" x2="16" y2="22" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-      <line x1="16" y1="14" x2="21.5" y2="22" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" opacity="0.6" />
-      <circle cx="16" cy="11" r="1.8" fill="currentColor" />
+    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden="true">
+      <path d="M5 16c3.5-6 7.2-9 11-9s7.5 3 11 9c-3.5 6-7.2 9-11 9s-7.5-3-11-9z" stroke="currentColor" strokeWidth="2.4" strokeLinejoin="round" />
+      <path d="M12.5 16h1.5l1.4-3.5 2.2 7 1.4-3.5h1.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
-  );
-}
-
-export function SpectraWordmark({ subtitle = 'Crowd Safety Ops' }: { subtitle?: string }) {
-  return (
-    <div className="brand">
-      <div className="brand-mark"><SpectraLogo /></div>
-      <div className="brand-text">
-        <b>SPECTRA</b>
-        <span>{subtitle}</span>
-      </div>
-    </div>
   );
 }

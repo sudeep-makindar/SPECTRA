@@ -25,11 +25,16 @@ def _load_dotenv() -> None:
     env = PROJECT_ROOT / ".env"
     if not env.exists():
         return
-    for line in env.read_text().splitlines():
+    for line in env.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+            v = v.strip()
+            if v[:1] in ('"', "'"):
+                v = v[1:].split(v[0], 1)[0]  # quoted: take what's inside the quotes
+            else:
+                v = v.split(" #", 1)[0].strip()  # unquoted: drop an inline "# comment"
+            os.environ.setdefault(k.strip(), v)
 
 
 _load_dotenv()
@@ -70,6 +75,9 @@ async def lifespan(app: FastAPI):
     # Start source staleness monitor
     registry = SourceRegistry.instance()
     await registry.start_staleness_monitor()
+
+    # Bring back every device added before (same ids and pairing tokens)
+    await registry.restore()
 
     # If sim_mode, auto-create simulated sources for demo
     if config.sim_mode:

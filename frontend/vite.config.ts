@@ -11,6 +11,9 @@ const https = fs.existsSync(path.join(certDir, 'cert.pem'))
   ? { key: fs.readFileSync(path.join(certDir, 'key.pem')), cert: fs.readFileSync(path.join(certDir, 'cert.pem')) }
   : undefined
 
+// Backend port; override with SPECTRA_BACKEND_PORT if 8000 is taken.
+const backend = `localhost:${process.env.SPECTRA_BACKEND_PORT ?? 8000}`
+
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [
@@ -23,15 +26,15 @@ export default defineConfig({
     https,
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: `http://${backend}`,
         changeOrigin: true,
       },
       '/ws': {
-        target: 'ws://localhost:8000',
+        target: `ws://${backend}`,
         ws: true,
       },
       '/data': {
-        target: 'http://localhost:8000',
+        target: `http://${backend}`,
         changeOrigin: true,
       },
     },

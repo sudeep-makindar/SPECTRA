@@ -43,6 +43,7 @@ class AstAudioModel(BaseModel):
         self._device = "cpu"
         self._loaded = False
         self._whisper = None
+        self._whisper_device = "cpu"
         self._config = load_config()
 
         raw = yaml.safe_load((CONFIG_DIR / "audio_groups.yaml").read_text())
@@ -69,8 +70,10 @@ class AstAudioModel(BaseModel):
         if self._config.audio.whisper_enabled:
             try:
                 import whisper
-                # Whisper's sparse ops are unreliable on MPS; CPU tiny is fast enough.
-                self._whisper = whisper.load_model(self._config.audio.whisper_model, device="cpu")
+                # Whisper's sparse ops are unreliable on MPS, so on a Mac it runs on the
+                # CPU (tiny is fast enough). An NVIDIA GPU runs it directly.
+                self._whisper_device = "cuda" if device == "cuda" else "cpu"
+                self._whisper = whisper.load_model(self._config.audio.whisper_model, device=self._whisper_device)
                 logger.info("Whisper '%s' loaded for multilingual keyword spotting", self._config.audio.whisper_model)
             except Exception as exc:
                 logger.warning("Whisper unavailable (%s) — keyword spotting disabled", exc)
@@ -92,6 +95,9 @@ class AstAudioModel(BaseModel):
             logits = self._model(feats.input_values.to(self._device)).logits
         probs = torch.sigmoid(logits)[0].cpu()
 
+        top5 = torch.topk(probs, 5)
+        top_classes = [{"label": self._model.config.id2label[int(i)], "p": round(float(p), 3)}
+                       for p, i in zip(top5.values, top5.indices)]
         top_idx = int(torch.argmax(probs))
         top_class = self._model.config.id2label[top_idx]
         top_prob = float(probs[top_idx])
@@ -122,7 +128,7 @@ class AstAudioModel(BaseModel):
         if self._whisper is not None and rms > RMS_GATE and speechiness > 0.15:
             t0 = time.time()
             try:
-                res = self._whisper.transcribe(audio, fp16=False, condition_on_previous_text=False,
+                res = self._whisper.transcribe(audio, fp16=self._whisper_device == "cuda", condition_on_previous_text=False,
                                                no_speech_threshold=0.6, temperature=0.0)
                 segs = [s for s in res.get("segments", []) if s.get("no_speech_prob", 0) < 0.6]
                 detected_text = " ".join(s["text"].strip() for s in segs).strip()
@@ -157,6 +163,7 @@ class AstAudioModel(BaseModel):
             "rms": round(rms, 4),
             "whisper_ms": whisper_ms,
             "groups": {k: round(v[0], 3) for k, v in group_scores.items()},
+            "top5": top_classes,
         }
 
     def info(self) -> ModelInfo:

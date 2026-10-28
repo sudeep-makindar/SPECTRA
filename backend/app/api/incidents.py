@@ -8,7 +8,7 @@ import asyncio
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from app.core.config import INCIDENTS_DIR
@@ -56,6 +56,27 @@ def get_incident(incident_id: str) -> dict:
     if not inc:
         raise HTTPException(status_code=404, detail="Incident not found")
     return inc
+
+
+def incident_announcements(inc: dict) -> list[dict]:
+    """Announcements made in this alert's zone (or to every zone) while it was open."""
+    from app.announce import AnnouncementHub
+    import time
+    end = inc.get("ended_at") or time.time()
+    return [a for a in AnnouncementHub.instance().recent(20)
+            if inc["started_at"] - 5 <= a["ts"] <= end + 60 and a["zone_id"] in (None, inc["zone_id"])]
+
+
+@router.get("/{incident_id}/report", response_class=HTMLResponse)
+async def incident_report(incident_id: str, download: bool = False) -> HTMLResponse:
+    """The alert as one self-contained HTML file (print it to get a PDF)."""
+    from app.reports.incident_report import build_report
+    inc = IncidentStore.instance().get(incident_id)
+    if not inc:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    page = await asyncio.to_thread(build_report, inc, incident_announcements(inc))
+    headers = {"Content-Disposition": f'attachment; filename="spectra-report-{incident_id}.html"'} if download else {}
+    return HTMLResponse(page, headers=headers)
 
 
 @router.post("/{incident_id}/action")
