@@ -655,3 +655,70 @@ body {
   max-width: 280px;
   line-height: 1.5;
 }
+
+/* ── Light Mode Support ─────────────────────────────────────────────── */
+
+.app-frame.light-mode {
+  background: #F4F4F1;
+  border-color: #E2E2DC;
+}
+
+.app-frame.light-mode .card-dark {
+  background: rgba(255, 255, 255, 0.85);
+  color: #1B1B1F;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+}
+
+.app-frame.light-mode .card-label {
+  color: #555560;
+}
+
+.app-frame.light-mode .input-group {
+  background: #EAEAE4;
+  border-color: #DCDCD6;
+  color: #1B1B1F;
+}
+
+.app-frame.light-mode .input-chip {
+  background: #D8D8D0;
+  color: #2A2A30;
+}
+
+.app-frame.light-mode input,
+.app-frame.light-mode select {
+  color: #1B1B1F;
+}
+
+/* ── Global Dialog Styles ──────────────────────────────────────────── */
+
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(12, 12, 15, 0.82);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 16px;
+  animation: fadeIn 0.15s ease-out;
+}
+
+.dialog-content {
+  width: 100%;
+  animation: scaleUp 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes scaleUp {
+  from { transform: scale(0.95); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+

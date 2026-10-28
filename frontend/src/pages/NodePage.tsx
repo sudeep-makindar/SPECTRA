@@ -15,7 +15,7 @@ export function NodePage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const loopRef = useRef<number>();
+  const loopRef = useRef<number | undefined>(undefined);
 
   // Check URL for token on mount
   useEffect(() => {

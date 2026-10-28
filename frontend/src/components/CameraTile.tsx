@@ -15,7 +15,7 @@ interface CameraTileProps {
 export function CameraTile({ source }: CameraTileProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const [previewActive, setPreviewActive] = useState(false);
+  const [previewActive, setPreviewActive] = useState(false); void previewActive;
 
   useEffect(() => {
     if (source.status === 'offline') return;

@@ -71,7 +71,7 @@ const INITIAL_STATE: LiveState = {
 export function useSpectraSocket(): LiveState {
   const [state, setState] = useState<LiveState>(INITIAL_STATE);
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const connect = useCallback(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
